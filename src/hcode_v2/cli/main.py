@@ -4,8 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+
+# Propagate into os.environ so subprocesses inherit them
+_OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+_OPENAI_URL = os.getenv("OPENAI_BASE_URL")
+if _OPENAI_KEY:
+    os.environ["OPENAI_API_KEY"] = _OPENAI_KEY
+if _OPENAI_URL:
+    os.environ["OPENAI_BASE_URL"] = _OPENAI_URL
 
 import click
 from langchain_core.messages import HumanMessage
@@ -14,18 +26,10 @@ from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.display import HCodeDisplay
 
 _VERSION = "HCode v2.0.0 — powered by DeepAgents + LangGraph"
-_DEFAULT_MODEL = "openai:gpt-4o"
 
 
 def _extract_text(content: object) -> str:
-    """Pull plain text out of an AIMessage content value.
-
-    Args:
-        content: Either a plain string or a list of content-block dicts.
-
-    Returns:
-        The concatenated text content.
-    """
+    """Pull plain text out of an AIMessage content value."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -56,10 +60,9 @@ def cli() -> None:
 
 @cli.command()
 @click.argument("task")
-@click.option("--model", "-m", default=_DEFAULT_MODEL, show_default=True, help="LangChain model string.")
 @click.option("--no-pev", is_flag=True, default=False, help="Disable Plan-Execute-Verify loop.")
 @click.option("--fast", is_flag=True, default=False, help="Skip planning — execute in one shot.")
-def run(task: str, model: str, no_pev: bool, fast: bool) -> None:
+def run(task: str, no_pev: bool, fast: bool) -> None:
     """Run a single TASK and print the result."""
     display = HCodeDisplay()
 
@@ -69,7 +72,7 @@ def run(task: str, model: str, no_pev: bool, fast: bool) -> None:
     display.show_task_header(task)
 
     async def _invoke() -> str:
-        agent = await create_hcode_agent(model=model, enable_pev=not no_pev)
+        agent = await create_hcode_agent(enable_pev=not no_pev)
         result = await agent.ainvoke({"messages": [HumanMessage(content=task)]})
         messages = result.get("messages", [])
         if not messages:
@@ -90,8 +93,7 @@ def run(task: str, model: str, no_pev: bool, fast: bool) -> None:
 
 
 @cli.command()
-@click.option("--model", "-m", default=_DEFAULT_MODEL, show_default=True, help="LangChain model string.")
-def chat(model: str) -> None:
+def chat() -> None:
     """Start an interactive chat session with the HCode agent.
 
     Special commands:
@@ -100,11 +102,12 @@ def chat(model: str) -> None:
       /exit, /quit — end the session
     """
     display = HCodeDisplay()
-    display.console.print(f"[bold blue]HCode v2 Chat[/bold blue]  (model: {model})")
+    model_name = os.getenv("HCODE_MODEL", "gpt-4o-mini")
+    display.console.print(f"[bold blue]HCode v2 Chat[/bold blue]  (model: {model_name})")
     display.console.print("[dim]Type /exit or /quit to end the session.[/dim]\n")
 
     async def _chat_loop() -> None:
-        agent = await create_hcode_agent(model=model)
+        agent = await create_hcode_agent()
         messages: list = []
 
         while True:
@@ -185,7 +188,7 @@ def mcp_list(config: str) -> None:
 def mcp_connect(server: str, config: str) -> None:
     """Connect to SERVER and list its available tools."""
     display = HCodeDisplay()
-    from deepagents.mcp.client import MCPClient, MCPClientManager
+    from deepagents.mcp.client import MCPClientManager
 
     async def _connect() -> None:
         manager = MCPClientManager(config_path=config)

@@ -248,5 +248,16 @@ class MCPClientManager:
         """Return the IDs of all currently connected servers."""
         return list(self._clients.keys())
 
+    @property
+    def is_configured(self) -> bool:
+        """Return True if config file exists and has at least one server."""
+        if not self.config_path.exists():
+            return False
+        try:
+            data = json.loads(self.config_path.read_text())
+            return bool(data.get("servers"))
+        except Exception:
+            return False
+
 
 __all__ = ["MCPClient", "MCPClientManager", "MCPServerConfig", "MCPToolInfo"]
