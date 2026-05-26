@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A content writer agent configured entirely through files on disk"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents>=0.3.5",
+    "deepagents>=0.6.3",
     "google-genai>=1.0.0",
     "pillow>=12.2.0",
     "pyyaml>=6.0.0",
