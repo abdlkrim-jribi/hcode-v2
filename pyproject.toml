@@ -1,0 +1,27 @@
+[project]
+name = "hcode-v2"
+version = "2.0.0"
+description = "HCode v2 — Autonomous AI coding CLI agent built on DeepAgents + LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents",
+    "click>=8.0",
+    "rich>=13.0",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "langchain-anthropic>=0.3",
+]
+
+[project.scripts]
+hcode = "hcode_v2.cli.main:cli"
+hcode_v2 = "hcode_v2.cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+deepagents = { path = "libs/deepagents", editable = true }
