@@ -63,6 +63,9 @@ async def create_hcode_agent(
 
     model = _build_model()
 
+    # Create backend ONCE — shared by SummarizationMiddleware and agent
+    backend = LocalShellBackend(virtual_mode=False)
+
     middleware = []
     if enable_pev:
         middleware.append(PEVMiddleware())
@@ -77,13 +80,15 @@ async def create_hcode_agent(
         try:
             mcp_tools = await MCPToolRegistry.build_tools(manager)
         except Exception as e:
-            logger.warning("MCP connection failed, continuing without MCP tools: %s", e)
+            logger.warning("MCP failed: %s", e)
 
-    all_tools = mcp_tools
+    # All 31 tools are ~1213 tokens total — safe to pass all
+    from hcode_v2.tools.registry import get_all_tools
+    all_tools = get_all_tools() + mcp_tools
 
     return create_deep_agent(
         model=model,
         tools=all_tools,
         middleware=middleware,
-        backend=LocalShellBackend(virtual_mode=False),
+        backend=backend,
     )
