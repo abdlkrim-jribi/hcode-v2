@@ -177,59 +177,100 @@ def chat(session: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-@cli.group()
-def mcp() -> None:
-    """Manage MCP server connections."""
+@cli.command(name="mcp")
+@click.argument("action", type=click.Choice(["list", "connect", "known"]))
+@click.argument("server", required=False)
+def mcp_cmd(action: str, server: str | None) -> None:
+    """Manage MCP server connections.
 
-
-@mcp.command("list")
-@click.option("--config", default=".hcode/mcp_config.json", show_default=True, help="MCP config file path.")
-def mcp_list(config: str) -> None:
-    """List MCP servers defined in the config file."""
-    display = HCodeDisplay()
-    config_path = Path(config)
-
-    if not config_path.exists():
-        display.console.print(f"[dim]Config file not found: {config}[/dim]")
-        return
-
-    data: dict = json.loads(config_path.read_text())
-    servers = [
-        {"name": server_id, "command": srv.get("command", ""), "status": "configured"}
-        for server_id, srv in data.get("servers", {}).items()
-    ]
-    display.show_mcp_servers(servers)
-
-
-@mcp.command("connect")
-@click.argument("server")
-@click.option("--config", default=".hcode/mcp_config.json", show_default=True, help="MCP config file path.")
-def mcp_connect(server: str, config: str) -> None:
-    """Connect to SERVER and list its available tools."""
-    display = HCodeDisplay()
+    Actions:
+      list     Show configured servers from .hcode/mcp_config.json
+      known    Show all available preset servers
+      connect  Add a preset server to your config
+    """
     from deepagents.mcp.client import MCPClientManager
 
-    async def _connect() -> None:
-        manager = MCPClientManager(config_path=config)
-        await manager.connect_all()
-        client = manager.get_client(server)
-        if client is None:
-            display.show_error(f"Server '{server}' not found or failed to connect.")
-            return
-        tools = client.tools
-        if not tools:
-            display.console.print(f"[dim]No tools reported by server '{server}'.[/dim]")
-            return
-        display.console.print(f"\n[bold cyan]Tools from '{server}':[/bold cyan]")
-        for tool in tools:
-            display.console.print(f"  [bold]{tool.name}[/bold]: {tool.description}")
-        await manager.disconnect_all()
+    display = HCodeDisplay()
+    manager = MCPClientManager()
 
-    try:
-        asyncio.run(_connect())
-    except Exception as exc:  # noqa: BLE001
-        display.show_error(str(exc))
-        sys.exit(1)
+    if action == "known":
+        servers = manager.list_known_servers()
+        from rich.table import Table
+        table = Table(title="Available MCP Servers")
+        table.add_column("Name", style="cyan")
+        table.add_column("Description")
+        table.add_column("Requires", style="yellow")
+        for s in servers:
+            requires = ", ".join(s.get("env_required", [])) or "-"
+            table.add_row(s["name"], s["description"], requires)
+        display.console.print(table)
+        return
+
+    if action == "list":
+        if not manager.is_configured:
+            display.console.print(
+                "[dim]No servers configured. "
+                "Run: hcode mcp known[/dim]"
+            )
+            return
+        try:
+            config = json.loads(
+                Path(".hcode/mcp_config.json").read_text()
+            )
+            servers_dict = config.get("servers", {})
+            from rich.table import Table
+            table = Table(title="Configured MCP Servers")
+            table.add_column("Name", style="cyan")
+            table.add_column("Command")
+            table.add_column("Args")
+            for name, cfg in servers_dict.items():
+                args = " ".join(cfg.get("args", []))
+                table.add_row(name, cfg.get("command", ""), args)
+            display.console.print(table)
+        except Exception as e:
+            display.show_error(str(e))
+        return
+
+    if action == "connect":
+        if not server:
+            display.console.print(
+                "[red]Usage: hcode mcp connect <server-name>[/red]"
+            )
+            display.console.print(
+                "Run [cyan]hcode mcp known[/cyan] to see options"
+            )
+            return
+        known = manager.get_known_server(server)
+        if not known:
+            display.show_error(
+                f"Unknown server: '{server}'. "
+                f"Run 'hcode mcp known' to see available servers."
+            )
+            return
+        if manager.is_configured:
+            try:
+                existing = json.loads(
+                    Path(".hcode/mcp_config.json").read_text()
+                )
+                if server in existing.get("servers", {}):
+                    display.console.print(
+                        f"[yellow]{server} already configured.[/yellow]"
+                    )
+                    return
+            except Exception:
+                pass
+        manager.add_server_to_config(server, known)
+        display.console.print(
+            f"[green]Added '{server}' to .hcode/mcp_config.json[/green]"
+        )
+        if known.get("env_required"):
+            display.console.print(
+                f"[yellow]Required env vars: "
+                f"{', '.join(known['env_required'])}[/yellow]"
+            )
+            display.console.print(
+                "[dim]Add them to your .env file.[/dim]"
+            )
 
 
 # ---------------------------------------------------------------------------
