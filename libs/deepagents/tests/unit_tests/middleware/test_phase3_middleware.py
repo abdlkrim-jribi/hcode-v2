@@ -91,7 +91,7 @@ class TestSafetyGuardMiddleware:
 
     def test_wrap_tool_call_backs_up_file_before_write(self) -> None:
         self._reads["/test.txt"] = "original content"
-        request = make_tool_request("write_file", {"file_path": "/test.txt", "content": "new"})
+        request = make_tool_request("write", {"path": "/test.txt", "content": "new"})
         handler = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="test-id"))
 
         self.middleware.wrap_tool_call(request, handler)
@@ -101,7 +101,7 @@ class TestSafetyGuardMiddleware:
 
     def test_wrap_tool_call_restores_backup_on_exception(self) -> None:
         self._reads["/test.txt"] = "original content"
-        request = make_tool_request("write_file", {"file_path": "/test.txt", "content": "new"})
+        request = make_tool_request("write", {"path": "/test.txt", "content": "new"})
 
         def failing_handler(req: ToolCallRequest) -> ToolMessage:
             msg = "write failed"
@@ -113,7 +113,7 @@ class TestSafetyGuardMiddleware:
         assert self._writes.get("/test.txt") == "original content"
 
     def test_wrap_tool_call_does_not_restore_when_no_backup(self) -> None:
-        request = make_tool_request("write_file", {"file_path": "/new.txt", "content": "x"})
+        request = make_tool_request("write", {"path": "/new.txt", "content": "x"})
 
         def failing_handler(req: ToolCallRequest) -> ToolMessage:
             msg = "fail"
@@ -126,7 +126,7 @@ class TestSafetyGuardMiddleware:
 
     def test_wrap_tool_call_skips_backup_for_non_destructive_tools(self) -> None:
         self._reads["/test.txt"] = "data"
-        request = make_tool_request("read_file", {"file_path": "/test.txt"})
+        request = make_tool_request("read", {"path": "/test.txt"})
         handler = MagicMock(return_value=ToolMessage(content="data", tool_call_id="test-id"))
 
         self.middleware.wrap_tool_call(request, handler)
@@ -135,7 +135,7 @@ class TestSafetyGuardMiddleware:
         handler.assert_called_once()
 
     def test_wrap_tool_call_handles_execute_without_backup(self) -> None:
-        request = make_tool_request("execute", {"command": "rm -rf /tmp/test"})
+        request = make_tool_request("bash", {"command": "rm -rf /tmp/test"})
         handler = MagicMock(return_value=ToolMessage(content="done", tool_call_id="test-id"))
 
         self.middleware.wrap_tool_call(request, handler)
@@ -150,7 +150,7 @@ class TestSafetyGuardMiddleware:
 
     def test_after_agent_snapshots_modified_files_to_state(self) -> None:
         self._reads["/a.txt"] = "old"
-        request = make_tool_request("write_file", {"file_path": "/a.txt", "content": "new"})
+        request = make_tool_request("write", {"path": "/a.txt", "content": "new"})
         handler = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="test-id"))
 
         self.middleware.wrap_tool_call(request, handler)
@@ -162,7 +162,7 @@ class TestSafetyGuardMiddleware:
     def test_modified_files_tracked_correctly(self) -> None:
         self.middleware.before_agent({}, self.runtime)
         for path in ("/a.txt", "/b.txt"):
-            req = make_tool_request("write_file", {"file_path": path, "content": "x"})
+            req = make_tool_request("write", {"path": path, "content": "x"})
             self.middleware.wrap_tool_call(req, MagicMock(return_value=ToolMessage(content="ok", tool_call_id="t")))
 
         modified = self.middleware.get_modified_files()
