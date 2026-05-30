@@ -58,10 +58,25 @@ async def create_hcode_agent(
     mcp_config: str = ".hcode/mcp_config.json",
     enable_pev: bool = True,
     enable_safety: bool = True,
+    session_id: str = "default",
+    persist: bool = True,
 ):
     """Assemble the full HCode v2 agent from environment config."""
+    from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
+    from langgraph.checkpoint.memory import MemorySaver
+
+    if persist:
+        Path(".hcode/sessions").mkdir(parents=True, exist_ok=True)
+        checkpointer = HCodeSQLiteCheckpointer(
+            db_path=f".hcode/sessions/{session_id}.db"
+        )
+    else:
+        checkpointer = MemorySaver()
 
     model = _build_model()
+
+    # Create backend ONCE — shared by SummarizationMiddleware and agent
+    backend = LocalShellBackend(virtual_mode=False)
 
     middleware = []
     if enable_pev:
@@ -77,13 +92,16 @@ async def create_hcode_agent(
         try:
             mcp_tools = await MCPToolRegistry.build_tools(manager)
         except Exception as e:
-            logger.warning("MCP connection failed, continuing without MCP tools: %s", e)
+            logger.warning("MCP failed: %s", e)
 
-    all_tools = mcp_tools
+    # All 31 tools are ~1213 tokens total — safe to pass all
+    from hcode_v2.tools.registry import get_all_tools
+    all_tools = get_all_tools() + mcp_tools
 
     return create_deep_agent(
         model=model,
         tools=all_tools,
         middleware=middleware,
-        backend=LocalShellBackend(virtual_mode=False),
+        backend=backend,
+        checkpointer=checkpointer,
     )
