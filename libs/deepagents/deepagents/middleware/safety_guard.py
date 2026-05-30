@@ -18,9 +18,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "execute"})
-_FILE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
-_FILE_ARG: str = "file_path"
+_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"write", "edit", "bash"})
+_FILE_TOOLS: frozenset[str] = frozenset({"write", "edit"})
+_FILE_ARG: str = "path"
 
 
 def _default_file_reader(path: str) -> str | None:

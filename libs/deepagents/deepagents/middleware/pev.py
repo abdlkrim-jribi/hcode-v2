@@ -59,7 +59,7 @@ _PHASE_PROMPTS: dict[str, str] = {
     "fast": _FAST_PROMPT,
 }
 
-_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "ls", "glob", "grep"})
+_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read", "ls", "glob", "grep"})
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
 _HASH_WINDOW: int = 5
