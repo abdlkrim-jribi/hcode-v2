@@ -14,6 +14,45 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CONFIG_PATH: str = ".hcode/mcp_config.json"
 
 
+KNOWN_SERVERS: dict[str, dict] = {
+    "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {},
+        "env_required": ["GITHUB_TOKEN"],
+        "description": "GitHub - issues, PRs, commits, repos (27 tools)",
+    },
+    "gitlab": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-gitlab"],
+        "env": {},
+        "env_required": ["GITLAB_TOKEN", "GITLAB_URL"],
+        "description": "GitLab - projects, issues, pipelines",
+    },
+    "web-fetch": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        "env": {},
+        "env_required": [],
+        "description": "Web fetch - fetch URLs, scrape pages",
+    },
+    "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "env": {},
+        "env_required": [],
+        "description": "Filesystem - extended file operations",
+    },
+    "sqlite-mcp": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sqlite"],
+        "env": {},
+        "env_required": [],
+        "description": "SQLite - query and manage SQLite databases",
+    },
+}
+
+
 class MCPServerConfig:
     """Configuration for a single MCP server.
 
@@ -247,6 +286,36 @@ class MCPClientManager:
     def connected_servers(self) -> list[str]:
         """Return the IDs of all currently connected servers."""
         return list(self._clients.keys())
+
+    def get_known_server(self, name: str) -> dict | None:
+        """Return the preset config for a known server, or ``None`` if unknown."""
+        return KNOWN_SERVERS.get(name)
+
+    def list_known_servers(self) -> list[dict]:
+        """Return all preset servers as ``{"name": ..., **config}`` dicts."""
+        return [{"name": k, **v} for k, v in KNOWN_SERVERS.items()]
+
+    def add_server_to_config(self, name: str, server_config: dict) -> None:
+        """Add (or overwrite) a server entry in the JSON config file.
+
+        Creates the config file and parent directory if they do not exist.
+        Only the ``command``/``args``/``env`` keys are persisted — catalog-only
+        metadata such as ``description`` and ``env_required`` is dropped.
+        """
+        config_data = {"servers": {}}
+        if self.config_path.exists():
+            try:
+                config_data = json.loads(self.config_path.read_text())
+            except Exception:
+                pass
+        config_data.setdefault("servers", {})
+        config_data["servers"][name] = {
+            "command": server_config["command"],
+            "args": server_config.get("args", []),
+            "env": server_config.get("env", {}),
+        }
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps(config_data, indent=2))
 
     @property
     def is_configured(self) -> bool:
