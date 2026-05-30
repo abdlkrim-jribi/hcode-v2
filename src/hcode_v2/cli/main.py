@@ -72,8 +72,14 @@ def run(task: str, no_pev: bool, fast: bool) -> None:
     display.show_task_header(task)
 
     async def _invoke() -> str:
+        import datetime
+
         agent = await create_hcode_agent(enable_pev=not no_pev)
-        result = await agent.ainvoke({"messages": [HumanMessage(content=task)]})
+        thread_id = "run_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=task)]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
         messages = result.get("messages", [])
         if not messages:
             return "(no response)"
@@ -93,7 +99,8 @@ def run(task: str, no_pev: bool, fast: bool) -> None:
 
 
 @cli.command()
-def chat() -> None:
+@click.option("--session", "-s", default=None, help="Session ID to resume. Defaults to new timestamped session.")
+def chat(session: str | None) -> None:
     """Start an interactive chat session with the HCode agent.
 
     Special commands:
@@ -101,14 +108,20 @@ def chat() -> None:
       /workflows — list available workflows
       /exit, /quit — end the session
     """
+    import datetime
+
+    session_id = session or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     display = HCodeDisplay()
     model_name = os.getenv("HCODE_MODEL", "gpt-4o-mini")
+    if session:
+        click.echo(f"Resuming session: {session_id}")
+    else:
+        click.echo(f"New session: {session_id}")
     display.console.print(f"[bold blue]HCode v2 Chat[/bold blue]  (model: {model_name})")
     display.console.print("[dim]Type /exit or /quit to end the session.[/dim]\n")
 
     async def _chat_loop() -> None:
-        agent = await create_hcode_agent()
-        messages: list = []
+        agent = await create_hcode_agent(session_id=session_id)
 
         while True:
             try:
@@ -141,11 +154,17 @@ def chat() -> None:
                 display.show_workflows(workflows)
                 continue
 
-            messages.append(HumanMessage(content=user_input))
             try:
-                result = await agent.ainvoke({"messages": messages})
-                messages = result.get("messages", messages)
-                response_text = _extract_text(messages[-1].content) if messages else "(no response)"
+                result = await agent.ainvoke(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config={"configurable": {"thread_id": session_id}},
+                )
+                result_messages = result.get("messages", [])
+                response_text = (
+                    _extract_text(result_messages[-1].content)
+                    if result_messages
+                    else "(no response)"
+                )
                 display.show_result(response_text)
             except Exception as exc:  # noqa: BLE001
                 display.show_error(str(exc))

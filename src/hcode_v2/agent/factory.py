@@ -58,8 +58,20 @@ async def create_hcode_agent(
     mcp_config: str = ".hcode/mcp_config.json",
     enable_pev: bool = True,
     enable_safety: bool = True,
+    session_id: str = "default",
+    persist: bool = True,
 ):
     """Assemble the full HCode v2 agent from environment config."""
+    from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
+    from langgraph.checkpoint.memory import MemorySaver
+
+    if persist:
+        Path(".hcode/sessions").mkdir(parents=True, exist_ok=True)
+        checkpointer = HCodeSQLiteCheckpointer(
+            db_path=f".hcode/sessions/{session_id}.db"
+        )
+    else:
+        checkpointer = MemorySaver()
 
     model = _build_model()
 
@@ -91,4 +103,5 @@ async def create_hcode_agent(
         tools=all_tools,
         middleware=middleware,
         backend=backend,
+        checkpointer=checkpointer,
     )
