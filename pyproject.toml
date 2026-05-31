@@ -25,3 +25,15 @@ where = ["src"]
 
 [tool.uv.sources]
 deepagents = { path = "libs/deepagents", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"

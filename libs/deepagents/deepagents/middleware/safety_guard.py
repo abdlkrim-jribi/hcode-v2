@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"write", "edit", "bash"})
-_FILE_TOOLS: frozenset[str] = frozenset({"write", "edit"})
+_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"write", "edit", "multi_edit", "bash"})
+_FILE_TOOLS: frozenset[str] = frozenset({"write", "edit", "multi_edit"})
 _FILE_ARG: str = "path"
 
 
