@@ -23,5 +23,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Vendored dependency pin.
+# `deepagents` is NOT resolved from PyPI or a git ref — it is vendored as committed
+# files under libs/deepagents/ and installed editable from this repo. Because the
+# source tree is committed here, upstream cannot silently shift under us.
+#   package : deepagents
+#   version : 0.6.3  (upstream: github.com/langchain-ai/deepagents)
+#   frozen  : hcode-v2 commit b57a6d2 — the last commit to touch libs/deepagents/
+# To update intentionally: re-vendor the upstream tree, bump the version above,
+# and record the new freeze commit here and in the README.
 [tool.uv.sources]
 deepagents = { path = "libs/deepagents", editable = true }
