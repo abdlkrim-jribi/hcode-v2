@@ -236,19 +236,19 @@ class TestPEVMiddlewarePromptInjection:
 
     def test_verify_keeps_only_readonly_tools(self) -> None:
         tools = [
-            make_mock_tool("read_file"),
-            make_mock_tool("write_file"),
+            make_mock_tool("read"),
+            make_mock_tool("write"),
             make_mock_tool("ls"),
-            make_mock_tool("execute"),
+            make_mock_tool("bash"),
             make_mock_tool("grep"),
         ]
         captured = self._call_wrap(make_pev_state(phase="verify"), tools=tools)
         assert captured is not None
         remaining = {t.name for t in captured.tools}
-        assert remaining == {"read_file", "ls", "grep"}
+        assert remaining == {"read", "ls", "grep"}
 
     def test_non_verify_phase_does_not_filter_tools(self) -> None:
-        tools = [make_mock_tool("read_file"), make_mock_tool("write_file"), make_mock_tool("execute")]
+        tools = [make_mock_tool("read"), make_mock_tool("write"), make_mock_tool("bash")]
         captured = self._call_wrap(make_pev_state(phase="execute"), tools=tools)
         assert captured is not None
         assert len(captured.tools) == 3
