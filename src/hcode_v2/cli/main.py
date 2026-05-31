@@ -43,6 +43,29 @@ def _extract_text(content: object) -> str:
     return str(content)
 
 
+def _enter_workdir(workdir: str | None) -> None:
+    """Change into `workdir` so the agent reads and writes there.
+
+    The agent's shell backend, session store (`.hcode/sessions/`), and skill and
+    workflow lookups are all relative to the current working directory, so
+    switching directory here is enough to point the whole agent at a target
+    project without the user having to `cd` first.
+
+    Args:
+        workdir: Directory to switch into, or `None` to stay in the current one.
+
+    Raises:
+        click.BadParameter: If `workdir` is given but is not an existing directory.
+    """
+    if not workdir:
+        return
+    path = Path(workdir).expanduser()
+    if not path.is_dir():
+        msg = f"workdir does not exist: {workdir}"
+        raise click.BadParameter(msg, param_hint="'--workdir'")
+    os.chdir(path)
+
+
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
@@ -62,9 +85,11 @@ def cli() -> None:
 @click.argument("task")
 @click.option("--no-pev", is_flag=True, default=False, help="Disable Plan-Execute-Verify loop.")
 @click.option("--fast", is_flag=True, default=False, help="Skip planning — execute in one shot.")
-def run(task: str, no_pev: bool, fast: bool) -> None:
+@click.option("--workdir", "-C", default=None, help="Change to this directory before running the task.")
+def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
     """Run a single TASK and print the result."""
     display = HCodeDisplay()
+    _enter_workdir(workdir)
 
     if fast:
         task = "/fast " + task
@@ -100,7 +125,8 @@ def run(task: str, no_pev: bool, fast: bool) -> None:
 
 @cli.command()
 @click.option("--session", "-s", default=None, help="Session ID to resume. Defaults to new timestamped session.")
-def chat(session: str | None) -> None:
+@click.option("--workdir", "-C", default=None, help="Change to this directory before starting the session.")
+def chat(session: str | None, workdir: str | None) -> None:
     """Start an interactive chat session with the HCode agent.
 
     Special commands:
@@ -110,6 +136,7 @@ def chat(session: str | None) -> None:
     """
     import datetime
 
+    _enter_workdir(workdir)
     session_id = session or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     display = HCodeDisplay()
     model_name = os.getenv("HCODE_MODEL", "gpt-4o-mini")
