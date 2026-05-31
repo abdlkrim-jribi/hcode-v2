@@ -1,111 +1,161 @@
-<div align="center">
-  <a href="https://docs.langchain.com/oss/python/deepagents/overview#deep-agents-overview">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset=".github/images/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset=".github/images/logo-light.svg">
-      <img alt="Deep Agents Logo" src=".github/images/logo-dark.svg" width="50%">
-    </picture>
-  </a>
-</div>
+# HCode v2
 
-<div align="center">
-  <h3>The batteries-included agent harness.</h3>
-</div>
+**An autonomous AI coding agent for the terminal, built on [DeepAgents](https://github.com/langchain-ai/deepagents) + [LangGraph](https://github.com/langchain-ai/langgraph) + [LangChain](https://github.com/langchain-ai/langchain).**
 
-<div align="center">
-  <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/pypi/l/deepagents" alt="PyPI - License"></a>
-  <a href="https://pypistats.org/packages/deepagents" target="_blank"><img src="https://img.shields.io/pepy/dt/deepagents" alt="PyPI - Downloads"></a>
-  <a href="https://pypi.org/project/deepagents/#history" target="_blank"><img src="https://img.shields.io/pypi/v/deepagents?label=%20" alt="Version"></a>
-  <a href="https://x.com/langchain_oss" target="_blank"><img src="https://img.shields.io/twitter/url/https/twitter.com/langchain_oss.svg?style=social&label=Follow%20%40LangChain" alt="Twitter / X"></a>
-</div>
+HCode v2 is a thin, opinionated CLI shell over the DeepAgents harness. DeepAgents
+supplies the agent loop, sub-agents, context management, persistence, and tooling
+primitives; HCode adds a Plan‑Execute‑Verify (PEV) workflow, a safety guard,
+a skills library, workflow files, an MCP client, and 31 coding tools wired in as
+LangChain tools.
 
-<br>
+It is model-agnostic: it talks to any OpenAI-compatible endpoint (including
+self-hosted `gpt-oss` models) or to Anthropic.
 
-Deep Agents is an open source agent harness — an opinionated agent that runs out of the box. Extend, override, or replace any piece.
+---
 
-**Principles:**
+## Install
 
-- **Opinionated** — defaults tuned for long-horizon, multi-step work
-- **Extensible** — override or replace any piece without forking
-- **Model-agnostic** — works with any LLM that supports tool calling: frontier, open-weight, or local
-- **Production-ready** — built on LangGraph (streaming, persistence, checkpointing) with first-class tracing, evaluation, and deployment via LangSmith
-
-**Features include:**
-
-- **Sub-agents** — delegate tasks to agents with isolated context windows
-- **Filesystem** — read, write, edit, or search over pluggable local, sandboxed, or remote backends
-- **Context management** — summarize long threads and offload tool outputs to disk
-- **Shell access** — run commands in your sandbox of choice
-- **Persistent memory** — pluggable state and store backends for cross-session recall
-- **Human-in-the-loop** — approve, edit, or reject tool calls before they run
-- **Skills** — reusable behaviors the agent can load on demand
-- **Tools** — bring your own functions or any MCP server
-
-> [!NOTE]
-> Deep Agents is available as a JavaScript/TypeScript library — see [deepagents.js](https://github.com/langchain-ai/deepagentsjs).
-
-## Quickstart
+HCode v2 uses [`uv`](https://docs.astral.sh/uv/) for environment and dependency
+management. The DeepAgents library is **vendored** under `libs/deepagents/` and
+installed as an editable path dependency (see [Vendored dependency](#vendored-dependency)).
 
 ```bash
-uv add deepagents
+# clone, then from the repo root:
+uv sync                     # create .venv and install everything (incl. vendored deepagents)
+uv run hcode version        # smoke-check the install
 ```
 
-```python
-from deepagents import create_deep_agent
-
-agent = create_deep_agent(
-    model="openai:gpt-5.5",
-    tools=[my_custom_tool],
-    system_prompt="You are a research assistant.",
-)
-result = agent.invoke({"messages": "Research LangGraph and write a summary"})
-```
-
-The agent can plan, read/write files, and manage its own context. Add your own tools, swap models, customize prompts, configure sub-agents, and more. See the [documentation](https://docs.langchain.com/oss/python/deepagents/overview) for full details.
-
-> [!TIP]
-> For developing, debugging, and deploying AI agents and LLM applications, see [LangSmith](https://docs.langchain.com/langsmith/home).
-
-> [!NOTE]
-> **Deep Agents Code** — a pre-built coding agent in your terminal, similar to Claude Code or Cursor, powered by any LLM. Install with `curl -LsSf https://langch.in/dcode | bash`. See the [documentation](https://docs.langchain.com/oss/python/deepagents/code/overview) for the full feature set.
-
-## FAQ
-
-### How is this different from LangGraph or LangChain?
-
-LangGraph is the graph runtime. LangChain's `create_agent` is a minimal agent harness on top of it. Deep Agents is a more opinionated harness on top of `create_agent` — same building blocks, but with filesystem, sub-agents, context management, and skills bundled in. For how the three relate, see the [LangChain ecosystem overview](https://docs.langchain.com/oss/python/concepts/products).
-
-### Does this work with open-weight or local models?
-
-Yes. Any model that supports tool calling works — frontier APIs (OpenAI, Anthropic, Google), open-weight models hosted on providers like Baseten or Fireworks, and self-hosted models via Ollama, vLLM, or llama.cpp. Use any [LangChain chat model](https://docs.langchain.com/oss/python/langchain/models).
-
-### Can I use this in production?
-
-Yes! Deep Agents is built on LangGraph, designed for production agent deployments. Pair it with [LangSmith](https://docs.langchain.com/langsmith/home) for tracing, evaluation, and monitoring. See [Going to production](https://docs.langchain.com/oss/python/deepagents/going-to-production) for the full guide.
-
-### When should I use Deep Agents vs. LangChain or LangGraph directly?
-
-All three are layers in the same stack. Use **Deep Agents** when you want the full harness — planning, context management, delegation — out of the box. Use [**LangChain's `create_agent`**](https://docs.langchain.com/oss/python/langchain/agents) when you want a lighter harness without the bundled middleware. Drop to [**LangGraph**](https://docs.langchain.com/oss/python/langgraph/overview) when the agent loop itself isn't the right shape and you need a custom graph.
-
-The layers compose: any LangGraph `CompiledStateGraph` can be passed in as a sub-agent to a Deep Agent, so custom orchestration plugs in alongside the harness's defaults.
+The console scripts `hcode` and `hcode_v2` are equivalent entry points.
 
 ---
 
-## Resources
+## Configuration
 
-- [Examples](examples/) — working agents and patterns
-- [Documentation](https://docs.langchain.com/oss/python/deepagents/overview) — conceptual overviews and guides
-- [API reference](https://reference.langchain.com/python/deepagents/) — complete reference for all public classes, functions, and types
-- [Discussions](https://forum.langchain.com/c/oss-product-help-lc-and-lg/deep-agents/18) — community forum for technical questions, ideas, and feedback
-- [Contributing Guide](https://docs.langchain.com/oss/python/contributing/overview) — how to contribute and find good first issues
-- [Code of Conduct](https://github.com/langchain-ai/langchain/?tab=coc-ov-file) — community guidelines and standards
+Configuration is read from environment variables, loaded from a `.env` file at the
+repo root (never commit secrets — `.env` is git-ignored; use `.env.example` as a
+template).
+
+| Variable            | Purpose                                                        | Default        |
+| ------------------- | -------------------------------------------------------------- | -------------- |
+| `HCODE_MODEL`       | Model name/string (e.g. `gpt-4o-mini`, `gpt-oss-120b`)         | `gpt-4o-mini`  |
+| `OPENAI_API_KEY`    | API key for the OpenAI-compatible endpoint                     | —              |
+| `OPENAI_BASE_URL`   | Base URL of the endpoint (set this for self-hosted / `gpt-oss`)| OpenAI default |
+| `ANTHROPIC_API_KEY` | Anthropic key — used instead of OpenAI when set and no `OPENAI_API_KEY` | — |
+| `HCODE_MAX_TOKENS`  | Max output tokens per call                                     | `2000`         |
+
+> The model layer prefers OpenAI-compatible config. If only `ANTHROPIC_API_KEY` is
+> set, HCode uses `ChatAnthropic`; otherwise it uses `ChatOpenAI` (honouring
+> `OPENAI_BASE_URL` so any compatible endpoint works).
+
+Example `.env`:
+
+```dotenv
+HCODE_MODEL=gpt-oss-120b
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://your-endpoint.example.com/v1
+```
 
 ---
 
-## Acknowledgements
+## Commands
 
-Inspired by Claude Code: an attempt to identify what makes it general-purpose, and push that further.
+```text
+hcode run <task>        Run a single task and print the result
+hcode chat              Interactive multi-turn session (persists across turns)
+hcode mcp <action>      Manage MCP servers: list | known | connect <name>
+hcode skill             List available skills from .hcode/skills/
+hcode workflow          List available workflows from .hcode/workflows/
+hcode version           Print the version string
+```
 
-## Security
+Common options:
 
-Deep Agents follows a "trust the LLM" model. The agent can do anything its tools allow. Enforce boundaries at the tool/sandbox level, not by expecting the model to self-police. See the [security policy](https://github.com/langchain-ai/deepagents?tab=security-ov-file) for more information.
+| Command | Option | Meaning |
+| ------- | ------ | ------- |
+| `run`   | `--workdir, -C <dir>` | Change into `<dir>` before running (point at any project) |
+| `run`   | `--fast`              | Skip planning — execute in one shot |
+| `run`   | `--no-pev`            | Disable the Plan‑Execute‑Verify loop |
+| `chat`  | `--workdir, -C <dir>` | Change into `<dir>` before starting the session |
+| `chat`  | `--session, -s <id>`  | Resume a previous session by id |
+| `skill` / `workflow` | `--dir <path>` | Override the lookup directory |
+
+Because the agent's shell, session store (`.hcode/sessions/`), and skill/workflow
+lookups are all relative to the working directory, `--workdir` is enough to aim
+HCode at any project without `cd`-ing first.
+
+---
+
+## Demo sequence
+
+Point HCode at a project, run a task, and confirm the file lands:
+
+```bash
+# 1. create or pick a project directory
+mkdir -p /tmp/demo && cd /tmp/demo
+
+# 2. ask HCode to create a file (equivalently: hcode run -C /tmp/demo "...")
+uv run hcode run "create hello.py that prints 'hello from hcode v2'"
+
+# 3. verify the file is really there
+cat hello.py
+python hello.py
+```
+
+For an interactive session against the same project:
+
+```bash
+uv run hcode chat -C /tmp/demo
+you> add a function add(a, b) to hello.py and call it
+you> /exit
+```
+
+---
+
+## Architecture (one paragraph)
+
+`hcode_v2.cli.main` (Click) is the entry point. `hcode_v2.agent.factory.create_hcode_agent`
+assembles a DeepAgents agent via `create_deep_agent(...)` with: the model from
+`_build_model` (in `src/hcode_v2/agent/factory.py`), the 31 tools from
+`hcode_v2.tools.registry.get_all_tools`, a middleware stack
+(`PEVMiddleware`, `SafetyGuardMiddleware`, `HCodeSkillsMiddleware`, `WorkflowMiddleware`),
+a `LocalShellBackend`, and an `HCodeSQLiteCheckpointer` for session persistence.
+Streaming, sub-agents, context summarization, and human-in-the-loop come from
+DeepAgents itself.
+
+---
+
+## Vendored dependency
+
+DeepAgents is **not** pulled from PyPI or a git ref — it is vendored as committed
+files under `libs/deepagents/` and installed editable via
+`[tool.uv.sources]` in `pyproject.toml`. Because the source is committed into this
+repository, upstream cannot silently shift under us.
+
+| | |
+| --- | --- |
+| Package | `deepagents` |
+| Version | `0.6.3` |
+| Upstream | [langchain-ai/deepagents](https://github.com/langchain-ai/deepagents) |
+| Frozen at (hcode-v2 commit) | `b57a6d2` — last commit to touch `libs/deepagents/` |
+
+To intentionally update the vendored copy, re-vendor the upstream tree, bump the
+version here, and record the new freeze commit.
+
+---
+
+## Development
+
+```bash
+uv sync                              # install runtime deps + vendored deepagents
+uv run --group dev pytest            # run the HCode v2 shell test suite
+```
+
+- Tests live in `tests/` and must not make network calls.
+- `asyncio_mode = "auto"` is set, so async tests need no `@pytest.mark.asyncio`.
+- Commits follow Conventional Commits with a required scope (see `AGENTS.md`).
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
