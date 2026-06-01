@@ -2,7 +2,7 @@
 
 Usage:
     python -m hcode_v2.daemon                  # real agent (needs model config)
-    python -m hcode_v2.daemon --mock           # deterministic mock responses
+    python -m hcode_v2.daemon --mock           # deterministic mock w/ streaming events
     python -m hcode_v2.daemon --work-dir /p    # set working directory
 """
 
@@ -14,8 +14,6 @@ import logging
 import os
 import sys
 
-# Configure logging before importing anything else so all modules
-# that call getLogger() at import time inherit this config.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -30,24 +28,9 @@ def main() -> None:
     )
     parser.add_argument("--mock", action="store_true", help="Use mock agent (no LLM calls)")
     parser.add_argument("--work-dir", default=None, metavar="DIR", help="Set working directory")
-    parser.add_argument(
-        "--skills-dir",
-        default=".hcode/skills",
-        metavar="DIR",
-        help="Skills root (default: .hcode/skills)",
-    )
-    parser.add_argument(
-        "--workflows-dir",
-        default=".hcode/workflows",
-        metavar="DIR",
-        help="Workflows root (default: .hcode/workflows)",
-    )
-    parser.add_argument(
-        "--mcp-config",
-        default=".hcode/mcp_config.json",
-        metavar="FILE",
-        help="MCP config file (default: .hcode/mcp_config.json)",
-    )
+    parser.add_argument("--skills-dir", default=".hcode/skills", metavar="DIR")
+    parser.add_argument("--workflows-dir", default=".hcode/workflows", metavar="DIR")
+    parser.add_argument("--mcp-config", default=".hcode/mcp_config.json", metavar="FILE")
     args = parser.parse_args()
 
     if args.work_dir:
