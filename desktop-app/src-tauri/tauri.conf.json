@@ -5,8 +5,8 @@
     "build": {
         "frontendDist": "../src-ui/dist",
         "devUrl": "http://localhost:1420",
-        "beforeDevCommand": "npm --prefix ../src-ui run dev",
-        "beforeBuildCommand": "npm --prefix ../src-ui run build"
+        "beforeDevCommand": "npm --prefix src-ui run dev",
+        "beforeBuildCommand": "npm --prefix src-ui run build"
     },
     "app": {
         "windows": [
@@ -24,5 +24,15 @@
         "security": {
             "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
         }
+    },
+    "bundle": {
+        "active": true,
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ]
     }
 }
