@@ -1,0 +1,28 @@
+{
+    "productName": "HCode v2",
+    "version": "2.0.0",
+    "identifier": "com.hcode.v2.desktop",
+    "build": {
+        "frontendDist": "../src-ui/dist",
+        "devUrl": "http://localhost:1420",
+        "beforeDevCommand": "npm --prefix ../src-ui run dev",
+        "beforeBuildCommand": "npm --prefix ../src-ui run build"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "HCode v2 — AI Coding Agent",
+                "width": 1400,
+                "height": 900,
+                "minWidth": 900,
+                "minHeight": 600,
+                "decorations": true,
+                "resizable": true,
+                "center": true
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+        }
+    }
+}
