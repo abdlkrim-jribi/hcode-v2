@@ -1,10 +1,84 @@
 # HCode v2 — Launch Guide
 
-Two ways to run HCode v2 as a desktop app:
+Three ways to run HCode v2 as a desktop app:
 
 ---
 
-## A. Dev Launcher (recommended for demos and development)
+## A. One-click Desktop Launch (Windows) — recommended for demos
+
+No terminal needed after first-time setup. Double-click to start the full stack.
+
+### First-time setup (run once)
+
+```powershell
+# 1. Install prerequisites (Python + uv + Node) — see section B below if needed.
+
+# 2. Create the Desktop shortcut (run from the hcode-v2 root):
+powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1
+```
+
+This places an **HCode v2** icon on your Desktop.
+
+### Icon files
+
+Drop the following into `desktop-app/assets/` before running `create-shortcut.ps1`
+to get the branded icon on the Desktop shortcut:
+
+```
+desktop-app/assets/hcode-icon.ico   ← required for the Windows shortcut icon
+desktop-app/assets/hcode-icon.svg   ← optional (used by the React UI)
+desktop-app/assets/hcode-icon-*.png ← optional (used by the React UI)
+```
+
+If the `.ico` is absent, the shortcut is still created with the default Windows icon.
+You can drop the file in later and re-run `create-shortcut.ps1` to update it.
+
+### Launching
+
+Double-click **HCode v2** on your Desktop.
+
+The launcher (`scripts/launch.ps1`) auto-detects which mode to use:
+
+| `.env` state | Mode | What starts |
+|---|---|---|
+| No `.env` file | **MOCK** | `python scripts/dev.py --mock` |
+| `.env` exists but `HCODE_MODEL_API_KEY` is a placeholder | **MOCK** | `python scripts/dev.py --mock` |
+| `.env` exists with a real API key | **LIVE** | `python scripts/dev.py` |
+
+In **MOCK mode** a yellow banner is printed:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  MOCK MODE — offline demo, no API key needed                │
+│                                                             │
+│  Running in MOCK mode.                                      │
+│  Add your API key to .env and relaunch to go live.          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+To go **live**, edit `.env` and set:
+
+```env
+HCODE_MODEL_API_KEY=<your-real-key>
+HCODE_MODEL_NAME=gpt-4o-mini
+HCODE_MODEL_BASE_URL=https://your-endpoint.example.com/v1   # if self-hosted
+```
+
+Then double-click the Desktop icon again — it auto-switches to LIVE mode.
+
+### Running without the Desktop shortcut
+
+If you prefer a terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\launch.ps1
+```
+
+Or just double-click `scripts\launch.bat` in Explorer.
+
+---
+
+## B. Dev Launcher (command-line, cross-platform)
 
 No Rust/Tauri build needed.  One command starts everything.
 
@@ -57,7 +131,7 @@ The bridge.ts WS path is identical to what Tauri's `daemon.rs` does in Rust.
 
 ---
 
-## B. Full Tauri Desktop Build (production — C4)
+## C. Full Tauri Desktop Build (production — C4)
 
 Produces a native `.exe` installer.  Requires Rust + WebView2.
 
