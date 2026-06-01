@@ -9,7 +9,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pyyaml>=6.0.0",
     "rich>=13.0.0",
-    "tavily-python>=0.5.0",
+    "tavily-python>=0.7.25",
 ]
 
 [dependency-groups]
