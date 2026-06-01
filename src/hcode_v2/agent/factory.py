@@ -15,40 +15,43 @@ from deepagents.middleware.workflows import WorkflowMiddleware
 from deepagents.mcp.bridge import MCPToolRegistry
 from deepagents.mcp.client import MCPClientManager
 
+from hcode_v2.utils.config import Config
+
 logger = logging.getLogger(__name__)
 
 
 def _build_model():
-    """Build LangChain chat model from environment variables.
+    """Build a LangChain chat model from the resolved environment config.
 
-    Reads:
-      OPENAI_API_KEY      - API key (works for OpenRouter too)
-      OPENAI_BASE_URL     - optional base URL (set for OpenRouter)
-      ANTHROPIC_API_KEY   - Anthropic key (if using Anthropic)
-      HCODE_MODEL         - model string, e.g. gpt-4o-mini or claude-haiku-4-5
-      HCODE_MAX_TOKENS    - optional, default 2000
+    Model config (name, api_key, base_url) comes from `Config.from_env`, which
+    prefers the canonical ``HCODE_MODEL_NAME`` / ``HCODE_MODEL_BASE_URL`` /
+    ``HCODE_MODEL_API_KEY`` variables and falls back to ``HCODE_MODEL`` /
+    ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``.
+
+    Anthropic is selected when ``ANTHROPIC_API_KEY`` is set and no
+    OpenAI-compatible key was resolved; otherwise a `ChatOpenAI` client is built
+    against the (possibly self-hosted) endpoint. ``HCODE_MAX_TOKENS`` caps output
+    tokens (default 2000).
     """
-    model_name = os.getenv("HCODE_MODEL", "gpt-4o-mini")
+    config = Config.from_env()
     max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "2000"))
 
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
 
-    if anthropic_key and not openai_key:
+    if anthropic_key and not config.api_key:
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
-            model=model_name,
+            model=config.model,
             max_tokens=max_tokens,
             api_key=anthropic_key,
         )
 
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
-        model=model_name,
+        model=config.model,
         max_tokens=max_tokens,
-        api_key=openai_key,
-        base_url=base_url,
+        api_key=config.api_key,
+        base_url=config.base_url,
     )
 
 
