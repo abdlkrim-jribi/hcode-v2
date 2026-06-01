@@ -99,6 +99,17 @@ class TestSafetyGuardMiddleware:
         assert self.middleware.get_backup("/test.txt") == "original content"
         handler.assert_called_once()
 
+    def test_wrap_tool_call_backs_up_file_before_multi_edit(self) -> None:
+        # multi_edit is a destructive file tool and must trigger backup just like write/edit.
+        self._reads["/test.py"] = "original content"
+        request = make_tool_request("multi_edit", {"path": "/test.py", "edits": []})
+        handler = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="test-id"))
+
+        self.middleware.wrap_tool_call(request, handler)
+
+        assert self.middleware.get_backup("/test.py") == "original content"
+        handler.assert_called_once()
+
     def test_wrap_tool_call_restores_backup_on_exception(self) -> None:
         self._reads["/test.txt"] = "original content"
         request = make_tool_request("write", {"path": "/test.txt", "content": "new"})
