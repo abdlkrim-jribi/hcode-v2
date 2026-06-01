@@ -238,3 +238,5 @@ node_modules/
 
 .env
 .hcode/mcp_config.json
+desktop-app/src-ui/dist/
+desktop-app/src-ui/node_modules/
