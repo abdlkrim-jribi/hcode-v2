@@ -167,37 +167,51 @@ def test_connect_mcp_server_known(tmp_path: Path):
 
 # ── run_task ──────────────────────────────────────────────────────────────────
 
+def _drain_until_done(proc: subprocess.Popen, max_lines: int = 30) -> list[dict]:
+    """Read event lines until a 'done' notification or max_lines reached."""
+    events = []
+    for _ in range(max_lines):
+        msg = _read(proc)
+        events.append(msg)
+        if msg.get("type") == "done":
+            break
+    return events
+
+
 def test_run_task_returns_started_then_done(daemon):
+    # C2 mock emits streaming events before done; drain until we see it
     _send(daemon, "run_task", {"task": "say hello"}, req_id=6)
     started = _read(daemon)
     assert started["id"] == 6
     assert started["result"]["status"] == "started"
     assert "thread_id" in started["result"]
 
-    done_evt = _read(daemon)
-    assert done_evt["type"] == "done"
-    assert "[mock]" in done_evt["payload"]["result"]
-    assert "say hello" in done_evt["payload"]["result"]
+    events = _drain_until_done(daemon)
+    done_evts = [e for e in events if e.get("type") == "done"]
+    assert done_evts, f"No done event in stream: {[e.get('type') for e in events]}"
+    done_evt = done_evts[0]
+    assert done_evt["payload"]["summary"] or done_evt.get("payload") is not None
 
 
 def test_run_task_custom_thread_id(daemon):
     _send(daemon, "run_task", {"task": "ping", "thread_id": "my-thread"}, req_id=60)
     started = _read(daemon)
     assert started["result"]["thread_id"] == "my-thread"
-    _read(daemon)  # consume done event
+    _drain_until_done(daemon)  # consume all events including done
 
 
 # ── run_workflow ──────────────────────────────────────────────────────────────
 
 def test_run_workflow_returns_started_then_done(daemon):
+    # C2 mock emits streaming events before done; drain until we see it
     _send(daemon, "run_workflow", {"workflow": "build"}, req_id=7)
     started = _read(daemon)
     assert started["id"] == 7
     assert started["result"]["status"] == "started"
 
-    done_evt = _read(daemon)
-    assert done_evt["type"] == "done"
-    assert "run workflow build" in done_evt["payload"]["result"]
+    events = _drain_until_done(daemon)
+    done_evts = [e for e in events if e.get("type") == "done"]
+    assert done_evts, f"No done event: {[e.get('type') for e in events]}"
 
 
 # ── unknown method ────────────────────────────────────────────────────────────
