@@ -1,0 +1,129 @@
+/* ── Hcode Design Tokens v2.0 ─────────────────────────────────────────────────
+   Unified token architecture for Desktop App and VS Code Extension.
+   Philosophy: Restrained depth. Premium = quiet confidence, not glow.
+───────────────────────────────────────────────────────────────────────────────── */
+
+:root {
+    /* ── Surface Layers (5 levels, same hue 228, decreasing saturation) ────── */
+    --surface-0: hsl(228 18% 7%);
+    --surface-1: hsl(228 16% 10%);
+    --surface-2: hsl(228 14% 13%);
+    --surface-3: hsl(228 12% 16%);
+    --surface-4: hsl(228 12% 19%);
+
+    /* ── Foreground (3 levels) ─────────────────────────────────────────────── */
+    --fg-primary: hsl(220 20% 93%);
+    --fg-secondary: hsl(220 14% 55%);
+    --fg-tertiary: hsl(220 10% 35%);
+
+    /* ── Brand & Accent ────────────────────────────────────────────────────── */
+    --accent: hsl(255 72% 58%);
+    --accent-hover: hsl(255 72% 52%);
+    --accent-subtle: hsl(255 50% 15%);
+
+    /* ── Semantic Colors ───────────────────────────────────────────────────── */
+    --semantic-success: hsl(152 60% 42%);
+    --semantic-warning: hsl(38 80% 52%);
+    --semantic-error: hsl(0 65% 52%);
+    --semantic-info: hsl(210 70% 55%);
+
+    /* ── Phase Colors ──────────────────────────────────────────────────────── */
+    --phase-thinking: hsl(265 65% 55%);
+    --phase-thinking-soft: hsla(265 65% 55% / 0.08);
+    --phase-planning: hsl(217 70% 55%);
+    --phase-planning-soft: hsla(217 70% 55% / 0.08);
+    --phase-executing: hsl(38 80% 52%);
+    --phase-executing-soft: hsla(38 80% 52% / 0.08);
+    --phase-verifying: hsl(152 60% 42%);
+    --phase-verifying-soft: hsla(152 60% 42% / 0.08);
+
+    /* ── Borders ───────────────────────────────────────────────────────────── */
+    --border-default: hsl(228 14% 16%);
+    --border-subtle: hsl(228 10% 13%);
+    --border-focus: var(--accent);
+
+    /* ── Diff Colors ───────────────────────────────────────────────────────── */
+    --diff-added-bg: hsla(152 50% 40% / 0.08);
+    --diff-added-border: hsla(152 50% 40% / 0.30);
+    --diff-removed-bg: hsla(0 50% 50% / 0.08);
+    --diff-removed-border: hsla(0 50% 50% / 0.30);
+    --diff-modified-bg: hsla(38 60% 50% / 0.08);
+
+    /* ── Spacing (4px base grid) ───────────────────────────────────────────── */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+
+    /* ── Border Radius ─────────────────────────────────────────────────────── */
+    --radius-xs: 3px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-full: 9999px;
+
+    /* ── Typography ────────────────────────────────────────────────────────── */
+    --font-ui: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+    --text-2xs: 10px;
+    --text-xs: 11px;
+    --text-sm: 12px;
+    --text-base: 13px;
+    --text-md: 14px;
+    --text-lg: 16px;
+    --text-xl: 20px;
+
+    /* ── Motion ────────────────────────────────────────────────────────────── */
+    --duration-fast: 100ms;
+    --duration-normal: 180ms;
+    --duration-slow: 300ms;
+    --ease-default: cubic-bezier(0.2, 0, 0, 1);
+
+    /* ── Shadows (minimal) ─────────────────────────────────────────────────── */
+    --shadow-sm: 0 1px 3px hsl(0 0% 0% / 0.15);
+    --shadow-md: 0 4px 12px hsl(0 0% 0% / 0.20);
+    --shadow-lg: 0 8px 24px hsl(0 0% 0% / 0.30);
+
+    /* ── Layout ────────────────────────────────────────────────────────────── */
+    --explorer-width: 220px;
+    --agent-width: 360px;
+    --titlebar-height: 32px;
+    --tab-height: 36px;
+    --statusbar-height: 24px;
+}
+
+/* ── Light Theme ──────────────────────────────────────────────────────────── */
+
+[data-theme="light"] {
+    --surface-0: hsl(220 14% 96%);
+    --surface-1: hsl(220 13% 93%);
+    --surface-2: hsl(220 12% 97%);
+    --surface-3: hsl(220 10% 90%);
+    --surface-4: hsl(220 10% 86%);
+
+    --fg-primary: hsl(220 20% 15%);
+    --fg-secondary: hsl(220 12% 45%);
+    --fg-tertiary: hsl(220 8% 60%);
+
+    --accent: hsl(255 72% 55%);
+    --accent-hover: hsl(255 72% 48%);
+    --accent-subtle: hsl(255 50% 92%);
+
+    --border-default: hsl(220 12% 86%);
+    --border-subtle: hsl(220 10% 90%);
+    --border-focus: var(--accent);
+
+    --diff-added-bg: hsla(152 50% 40% / 0.10);
+    --diff-added-border: hsla(152 50% 40% / 0.35);
+    --diff-removed-bg: hsla(0 50% 50% / 0.10);
+    --diff-removed-border: hsla(0 50% 50% / 0.35);
+    --diff-modified-bg: hsla(38 60% 50% / 0.10);
+
+    --shadow-sm: 0 1px 3px hsl(0 0% 0% / 0.06);
+    --shadow-md: 0 4px 12px hsl(0 0% 0% / 0.08);
+    --shadow-lg: 0 8px 24px hsl(0 0% 0% / 0.12);
+}
