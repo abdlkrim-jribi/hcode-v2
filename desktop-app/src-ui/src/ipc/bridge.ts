@@ -285,13 +285,31 @@ export async function openFolder(): Promise<string | null> {
     }
     return (await getInvoke())('open_folder_dialog') as Promise<string | null>;
 }
+/**
+ * Filesystem bypass policy (same as openFolder):
+ * When running inside the Tauri native shell, always use real Tauri commands
+ * regardless of VITE_MOCK — the filesystem is real, not part of agent mocking.
+ * Outside Tauri (browser, WS-proxy) mock returns [] / '' as placeholders.
+ */
 export async function listDirectory(path: string): Promise<FileEntry[]> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<FileEntry[]>('list_directory', { path });
+    }
     return (await getInvoke())('list_directory', { path }) as Promise<FileEntry[]>;
 }
 export async function readFile(path: string): Promise<string> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<string>('read_file', { path });
+    }
     return (await getInvoke())('read_file', { path }) as Promise<string>;
 }
 export async function writeFile(path: string, content: string): Promise<void> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<void>('write_file', { path, content });
+    }
     return (await getInvoke())('write_file', { path, content }) as Promise<void>;
 }
 
