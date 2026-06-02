@@ -126,6 +126,10 @@ export default function App() {
   const [showDiffReview, setShowDiffReview]         = useState(false);
   const [capabilityPanel, setCapabilityPanel]       = useState<null | 'mcp' | 'skills' | 'workflows'>(null);
 
+  // Active skill selected from the Skills panel.
+  // Shown as a chip in AgentPanel; its name is appended to submitted tasks.
+  const [activeSkill, setActiveSkill] = useState<string | null>(null);
+
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('hcode-theme') as 'dark' | 'light') || 'dark'
   );
@@ -443,7 +447,17 @@ export default function App() {
                   <span className="hcode-agent-title">SKILLS</span>
                   <div className="hcode-agent-actions"><span className="hcode-agent-icon" onClick={() => setCapabilityPanel(null)} title="Back">✕</span></div>
                 </div>
-                <div style={{ flex: 1, overflowY: 'auto' }}><SkillsPanel /></div>
+                <div style={{ flex: 1, overflowY: 'auto' }}>
+                  <SkillsPanel
+                    activeSkill={activeSkill}
+                    onSelect={name => {
+                      setActiveSkill(name);
+                      setCapabilityPanel(null); // return to agent stream view
+                      setAgentCollapsed(false);
+                      setFocus('agent');
+                    }}
+                  />
+                </div>
               </div>
             ) : capabilityPanel === 'workflows' ? (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -464,6 +478,8 @@ export default function App() {
                 onReviewDiffs={handleReviewDiffs}
                 onAbortTask={async () => { await ipc.abortTask(); dispatch({ type: 'CLEAR_ERROR' }); dispatch({ type: 'SET_PHASE', phase: 'idle' }); dispatch({ type: 'CLEAR_STREAMING' }); }}
                 onClearError={() => dispatch({ type: 'CLEAR_ERROR' })}
+                activeSkill={activeSkill}
+                onDismissSkill={() => setActiveSkill(null)}
               />
             )}
           </div>
