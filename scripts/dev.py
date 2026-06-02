@@ -44,19 +44,22 @@ ENV_FILE = ROOT / ".env"
 UI_PORT = 1420
 WS_PORT = 1421
 
+# On Windows, npm is npm.cmd — subprocess.Popen won't find bare "npm"
+NPM = "npm.cmd" if sys.platform == "win32" else "npm"
+
 
 def check_requirements(mock: bool) -> bool:
     ok = True
     if not shutil.which("node"):
         print("ERROR: 'node' not found. Install Node.js from https://nodejs.org", file=sys.stderr)
         ok = False
-    if not shutil.which("npm"):
+    if not shutil.which(NPM):
         print("ERROR: 'npm' not found.", file=sys.stderr)
         ok = False
     if not (UI_DIR / "node_modules" / ".bin" / "vite").exists() and \
        not (UI_DIR / "node_modules" / ".bin" / "vite.cmd").exists():
         print(f"INFO: node_modules not installed. Running 'npm install' in {UI_DIR} …")
-        subprocess.run(["npm", "install"], cwd=UI_DIR, check=True)
+        subprocess.run([NPM, "install"], cwd=UI_DIR, check=True)
     if not mock and ENV_FILE.exists():
         env_text = ENV_FILE.read_text()
         if "HCODE_MODEL_API_KEY" not in env_text and "OPENAI_API_KEY" not in env_text:
@@ -149,7 +152,7 @@ def main() -> None:
 
         # ── Step 2: Start Vite dev server ─────────────────────────────────────
         print(f"[2/2] Starting Vite dev server (http://localhost:{args.ui_port}) …")
-        vite_cmd = ["npm", "run", "dev", "--", "--port", str(args.ui_port)]
+        vite_cmd = [NPM, "run", "dev", "--", "--port", str(args.ui_port)]
         vite = subprocess.Popen(vite_cmd, cwd=str(UI_DIR), env=vite_env)
         processes.append(vite)
         time.sleep(2.5)
