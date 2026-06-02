@@ -266,7 +266,23 @@ export async function disconnectMcpServer(server: string): Promise<void> {
 
 // ── File system ───────────────────────────────────────────────────────────────
 
+/**
+ * Open a native OS folder picker.
+ *
+ * Bypass policy: the folder dialog is a system-UI action that has nothing to
+ * do with agent event mocking.  When the app is running inside the Tauri
+ * native shell we ALWAYS call the real Tauri command, even when VITE_MOCK=true
+ * is baked in (so the rest of the UI can still run in demo/mock mode).
+ *
+ * Outside Tauri (browser dev, WS-proxy launcher) we fall through to the
+ * generic invoke path, which in mock mode returns '/project' as a placeholder.
+ */
 export async function openFolder(): Promise<string | null> {
+    if (isTauri) {
+        // Use real native picker regardless of VITE_MOCK
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<string | null>('open_folder_dialog');
+    }
     return (await getInvoke())('open_folder_dialog') as Promise<string | null>;
 }
 export async function listDirectory(path: string): Promise<FileEntry[]> {
