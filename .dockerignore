@@ -1,0 +1,58 @@
+# ── Secrets — never copy into the build context ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Version control ──────────────────────────────────────────────────────────
+.git
+.gitignore
+.github
+
+# ── Python caches / build artifacts ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# ── Node / frontend — the backend image does not need the UI ─────────────────
+desktop-app/src-ui/node_modules/
+desktop-app/src-ui/dist/
+desktop-app/src-ui/.vite/
+node_modules/
+
+# ── Tauri / Rust build output ────────────────────────────────────────────────
+desktop-app/src-tauri/target/
+desktop-app/src-tauri/gen/
+desktop-app/src-tauri/Cargo.lock
+target/
+
+# ── Vendored deepagents: drop its tests/build cruft (source is still copied) ──
+libs/deepagents/tests/
+libs/deepagents/deepagents.egg-info/
+libs/deepagents/.venv/
+libs/deepagents/uv.lock
+
+# ── Agent runtime state / local data ─────────────────────────────────────────
+.hcode/sessions/
+workspace/
+
+# ── Docker / editor / OS noise ───────────────────────────────────────────────
+docker/
+Dockerfile*
+.dockerignore
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
