@@ -28,6 +28,7 @@ from langchain_core.messages import HumanMessage
 
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.display import HCodeDisplay
+from hcode_v2.utils.config import Config
 
 _VERSION = "HCode v2.0.0 — powered by DeepAgents + LangGraph"
 
@@ -406,6 +407,140 @@ def init(workdir: str | None, force: bool) -> None:
             "\n[yellow]Edit .env to set your model and API key, "
             "or run `hcode config set ...`.[/yellow]"
         )
+
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
+
+# Whitelisted, user-editable model/provider keys. These are the variables the
+# agent actually reads (Config.from_env + the two factory-only keys), persisted
+# to the project-local .env that the CLI loads at startup.
+_CONFIG_KEYS: tuple[str, ...] = (
+    "HCODE_MODEL_NAME",
+    "HCODE_MODEL_API_KEY",
+    "HCODE_MODEL_BASE_URL",
+    "HCODE_TOOLCALL_MODE",
+    "HCODE_MAX_TOKENS",
+    "ANTHROPIC_API_KEY",
+)
+_SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"HCODE_MODEL_API_KEY", "ANTHROPIC_API_KEY"}
+)
+
+
+def _mask_secret(value: str | None) -> str:
+    """Render a secret for display — e.g. ``sk-...****`` — never the full value."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 7:
+        return "****"
+    return f"{value[:3]}...****"
+
+
+def _set_env_value(path: Path, key: str, value: str) -> None:
+    """Write ``KEY=value`` into a .env file, preserving existing lines and comments.
+
+    Updates the key in place if a non-comment assignment already exists, otherwise
+    appends it. Creates the file (and parent directory) when missing.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    new_line = f"{key}={value}"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        if stripped.split("=", 1)[0].strip() == key:
+            lines[i] = new_line
+            break
+    else:
+        lines.append(new_line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@cli.group(name="config")
+def config_cmd() -> None:
+    """View and edit model/provider configuration in the project .env.
+
+    Subcommands:
+      list           Show resolved config (secrets masked)
+      get <KEY>      Print one key's effective value
+      set <KEY> VAL  Write a key to ./.env (takes effect next run)
+    """
+
+
+@config_cmd.command(name="list")
+def config_list() -> None:
+    """Show the resolved model/provider configuration (secrets masked)."""
+    from rich.table import Table
+
+    display = HCodeDisplay()
+    cfg = Config.from_env()
+    rows = [
+        ("HCODE_MODEL_NAME", cfg.model),
+        ("HCODE_MODEL_API_KEY", _mask_secret(cfg.api_key)),
+        ("HCODE_MODEL_BASE_URL", cfg.base_url or "(not set)"),
+        ("HCODE_TOOLCALL_MODE", cfg.toolcall_mode),
+        ("HCODE_MAX_TOKENS", os.getenv("HCODE_MAX_TOKENS", "2000")),
+        ("ANTHROPIC_API_KEY", _mask_secret(os.getenv("ANTHROPIC_API_KEY"))),
+    ]
+    table = Table(title="HCode Configuration")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    for key, value in rows:
+        table.add_row(key, value)
+    display.console.print(table)
+
+
+@config_cmd.command(name="get")
+@click.argument("key")
+def config_get(key: str) -> None:
+    """Print the effective value of a single config KEY (secrets masked)."""
+    display = HCodeDisplay()
+    if key not in _CONFIG_KEYS:
+        display.show_error(
+            f"Unknown config key: '{key}'. "
+            f"Valid keys: {', '.join(_CONFIG_KEYS)}."
+        )
+        sys.exit(1)
+    value = os.getenv(key)
+    if key in _SECRET_CONFIG_KEYS:
+        click.echo(_mask_secret(value))
+    else:
+        click.echo(value if value is not None else "(not set)")
+
+
+@config_cmd.command(name="set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Write KEY=VALUE to the project-local ./.env (takes effect next run)."""
+    display = HCodeDisplay()
+    if key not in _CONFIG_KEYS:
+        display.show_error(
+            f"Unknown config key: '{key}'. "
+            f"Valid keys: {', '.join(_CONFIG_KEYS)}."
+        )
+        sys.exit(1)
+    if key == "HCODE_TOOLCALL_MODE" and value not in ("native", "json", "auto"):
+        display.show_error("HCODE_TOOLCALL_MODE must be one of: native, json, auto.")
+        sys.exit(1)
+    if key == "HCODE_MAX_TOKENS":
+        try:
+            int(value)
+        except ValueError:
+            display.show_error("HCODE_MAX_TOKENS must be an integer.")
+            sys.exit(1)
+
+    env_path = Path(".env")
+    _set_env_value(env_path, key, value)
+    # Reflect into the running process so a follow-up `config get`/`list` is live.
+    os.environ[key] = value
+
+    shown = _mask_secret(value) if key in _SECRET_CONFIG_KEYS else value
+    display.console.print(f"[green]Set {key}={shown} in {env_path}[/green]")
 
 
 # ---------------------------------------------------------------------------
