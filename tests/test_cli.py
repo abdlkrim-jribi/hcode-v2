@@ -12,6 +12,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+import hcode_v2.cli.main as cli_main
 from hcode_v2.cli.main import cli
 
 runner = CliRunner()
@@ -26,12 +27,12 @@ def test_version_prints_hcode_v2() -> None:
 def test_top_level_help_lists_all_commands() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for command in ("run", "chat", "mcp", "skill", "workflow", "init", "config", "version"):
+    for command in ("run", "chat", "mcp", "skill", "workflow", "init", "config", "analyze", "explore", "version"):
         assert command in result.output
 
 
 def test_each_command_has_help() -> None:
-    for command in ("run", "chat", "mcp", "skill", "workflow", "init", "config", "version"):
+    for command in ("run", "chat", "mcp", "skill", "workflow", "init", "config", "analyze", "explore", "version"):
         result = runner.invoke(cli, [command, "--help"])
         assert result.exit_code == 0, f"{command} --help failed"
         assert "Usage" in result.output
@@ -261,3 +262,84 @@ def test_config_list_masks_secret(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "supersecretvalue" not in result.output
     assert "****" in result.output
+
+
+# --- analyze / explore ----------------------------------------------------
+#
+# analyze/explore are thin wrappers over the same agent run path as `run`; they
+# only pre-shape the task prompt. These tests assert the prompt builders and the
+# command wiring WITHOUT a live model by patching the shared _run_agent_task to
+# capture the (task, workdir) it would have run — so no network call is made.
+
+
+def test_analyze_and_explore_appear_in_help() -> None:
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "analyze" in result.output
+    assert "explore" in result.output
+
+
+def test_analyze_and_explore_have_help() -> None:
+    for command in ("analyze", "explore"):
+        result = runner.invoke(cli, [command, "--help"])
+        assert result.exit_code == 0, f"{command} --help failed"
+        assert "Usage" in result.output
+
+
+def test_build_analyze_task_default_and_deep() -> None:
+    base = cli_main._build_analyze_task("src", deep=False)
+    assert "Analyze the code at src." in base
+    assert "structure" in base and "risks" in base and "improvements" in base
+
+    deep = cli_main._build_analyze_task("src", deep=True)
+    # --deep extends the base prompt rather than replacing it.
+    assert deep.startswith(base)
+    assert len(deep) > len(base)
+
+
+def test_build_explore_task_embeds_query_and_asks_for_refs() -> None:
+    task = cli_main._build_explore_task("where is auth handled?")
+    assert "Explore this codebase to answer: where is auth handled?." in task
+    assert "file references" in task
+
+
+def _patch_capture(monkeypatch) -> dict:
+    """Replace the shared run path with a no-network capture and return the store."""
+    captured: dict = {}
+
+    def fake_run(task, workdir, **kwargs):
+        captured["task"] = task
+        captured["workdir"] = workdir
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli_main, "_run_agent_task", fake_run)
+    return captured
+
+
+def test_analyze_runs_built_prompt_through_run_path(tmp_path: Path, monkeypatch) -> None:
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["analyze", "src", "-C", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["task"] == cli_main._build_analyze_task("src", deep=False)
+    assert captured["workdir"] == str(tmp_path)
+
+
+def test_analyze_defaults_path_to_dot(monkeypatch) -> None:
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["analyze"])
+    assert result.exit_code == 0
+    assert captured["task"] == cli_main._build_analyze_task(".", deep=False)
+
+
+def test_analyze_deep_flag_changes_prompt(monkeypatch) -> None:
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["analyze", "src", "--deep"])
+    assert result.exit_code == 0
+    assert captured["task"] == cli_main._build_analyze_task("src", deep=True)
+
+
+def test_explore_runs_built_prompt_through_run_path(monkeypatch) -> None:
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["explore", "how does login work?"])
+    assert result.exit_code == 0
+    assert captured["task"] == cli_main._build_explore_task("how does login work?")
