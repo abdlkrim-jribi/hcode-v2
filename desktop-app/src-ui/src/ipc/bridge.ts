@@ -17,12 +17,24 @@ import type { HcodeMessage, FileEntry, DaemonInfo } from '../types';
 import { createMockEventStream, playMockStream, agentEventToHcodeMessage } from './mock-events';
 
 // ── Transport selection ───────────────────────────────────────────────────────
+//
+// Runtime config takes precedence over build-time Vite env so one static image
+// works in any environment. A Docker entrypoint writes /config.js (loaded before
+// the app bundle) which sets window.HCODE_WS_URL / window.HCODE_MOCK from env.
+// Resolution: window.HCODE_WS_URL → VITE_WS_URL → mock fallback.
+
+type RuntimeConfig = { HCODE_WS_URL?: string; HCODE_MOCK?: string };
+const _runtime: RuntimeConfig =
+    typeof window !== 'undefined' ? (window as unknown as RuntimeConfig) : {};
 
 const MOCK_MODE: boolean =
-    (import.meta.env as Record<string, string>).VITE_MOCK === 'true';
+    (import.meta.env as Record<string, string>).VITE_MOCK === 'true' ||
+    _runtime.HCODE_MOCK === 'true';
 
 const WS_URL: string | undefined =
-    (import.meta.env as Record<string, string>).VITE_WS_URL;
+    (_runtime.HCODE_WS_URL && _runtime.HCODE_WS_URL.trim()) ||
+    (import.meta.env as Record<string, string>).VITE_WS_URL ||
+    undefined;
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -32,20 +44,25 @@ type ListenFn = (event: string, handler: (e: { payload: unknown }) => void) => P
 async function getInvoke(): Promise<InvokeFn> {
     if (MOCK_MODE) return mockInvoke;
     if (WS_URL)    return wsInvoke;
-    if (!isTauri)  throw new Error('[IPC] Not in Tauri and VITE_MOCK/VITE_WS_URL not set.');
-    const { invoke } = await import('@tauri-apps/api/core');
-    return invoke as InvokeFn;
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke as InvokeFn;
+    }
+    console.warn('[IPC] No WS URL and not Tauri — falling back to mock daemon.');
+    return mockInvoke;
 }
 
 async function getListen(): Promise<ListenFn> {
     if (MOCK_MODE) return mockListen;
     if (WS_URL)    return wsListen;
-    if (!isTauri)  throw new Error('[IPC] Not in Tauri and VITE_MOCK/VITE_WS_URL not set.');
-    const { listen } = await import('@tauri-apps/api/event');
-    return listen as unknown as ListenFn;
+    if (isTauri) {
+        const { listen } = await import('@tauri-apps/api/event');
+        return listen as unknown as ListenFn;
+    }
+    return mockListen;
 }
 
-if (MOCK_MODE)   console.info('[IPC] VITE_MOCK=true — using mock daemon');
+if (MOCK_MODE)   console.info('[IPC] mock daemon (VITE_MOCK or window.HCODE_MOCK)');
 else if (WS_URL) console.info(`[IPC] WS transport — ${WS_URL}`);
 
 // ── WebSocket transport ───────────────────────────────────────────────────────
