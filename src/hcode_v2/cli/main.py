@@ -344,6 +344,71 @@ def workflow(workflows_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+
+_ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
+
+
+@cli.command()
+@click.option("--workdir", "-w", "-C", default=None,
+              help="Directory to scaffold. Defaults to current directory.")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite an existing .env and .hcode/mcp_config.json.")
+def init(workdir: str | None, force: bool) -> None:
+    """Scaffold an HCode v2 project (.env and the .hcode/ workspace).
+
+    Idempotent by default: an existing .env or mcp_config.json is left untouched.
+    Pass --force to overwrite them.
+    """
+    _validate_workdir(workdir)
+    display = HCodeDisplay()
+    root = Path(workdir) if workdir else Path.cwd()
+
+    created: list[str] = []
+    skipped: list[str] = []
+
+    # .env — copied from the repo's .env.example template (the config carrier).
+    env_path = root / ".env"
+    if env_path.exists() and not force:
+        skipped.append(".env")
+    else:
+        template = _ENV_EXAMPLE.read_text(encoding="utf-8") if _ENV_EXAMPLE.exists() else ""
+        env_path.write_text(template, encoding="utf-8")
+        created.append(".env")
+
+    # Workspace directories the agent reads relative to the working directory.
+    for sub in (".hcode/skills", ".hcode/workflows", ".hcode/sessions"):
+        directory = root / sub
+        if directory.is_dir():
+            skipped.append(sub + "/")
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+            created.append(sub + "/")
+
+    # MCP config — seeded empty so `hcode mcp add/connect` has a file to edit.
+    mcp_path = root / ".hcode" / "mcp_config.json"
+    if mcp_path.exists() and not force:
+        skipped.append(".hcode/mcp_config.json")
+    else:
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_path.write_text(json.dumps({"servers": {}}, indent=2) + "\n", encoding="utf-8")
+        created.append(".hcode/mcp_config.json")
+
+    display.console.print(f"[bold]Initialised HCode project in[/bold] {root}")
+    for item in created:
+        display.console.print(f"  [green]created[/green] {item}")
+    for item in skipped:
+        display.console.print(f"  [dim]exists [/dim] {item}")
+    if ".env" in created:
+        display.console.print(
+            "\n[yellow]Edit .env to set your model and API key, "
+            "or run `hcode config set ...`.[/yellow]"
+        )
+
+
+# ---------------------------------------------------------------------------
 # version
 # ---------------------------------------------------------------------------
 
