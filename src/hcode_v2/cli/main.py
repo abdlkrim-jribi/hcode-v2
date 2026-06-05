@@ -723,6 +723,30 @@ def analyze(path: str, deep: bool, workdir: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# explore
+# ---------------------------------------------------------------------------
+
+
+def _build_explore_task(query: str) -> str:
+    """Build the explore prompt that answers QUERY from the codebase."""
+    return (
+        f"Explore this codebase to answer: {query}. "
+        "Search the relevant files and summarize findings with file references."
+    )
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--workdir", "-w", "-C", default=None,
+              help="Working directory for file operations. Defaults to current directory.")
+def explore(query: str, workdir: str | None) -> None:
+    """Explore the codebase to answer QUERY, with file references."""
+    _validate_workdir(workdir)
+    task = _build_explore_task(query)
+    _run_agent_task(task, workdir)
+
+
+# ---------------------------------------------------------------------------
 # version
 # ---------------------------------------------------------------------------
 
