@@ -9,6 +9,10 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+# Project-local .env (cwd) wins; the repo-root .env stays as a fallback so existing
+# setups — including the daemon — keep working unchanged. load_dotenv does not
+# override already-set vars, so loading cwd first gives it precedence.
+load_dotenv(Path.cwd() / ".env")
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 # Propagate into os.environ so subprocesses inherit them
