@@ -72,6 +72,7 @@ async def create_hcode_agent(
     enable_safety: bool = True,
     session_id: str = "default",
     persist: bool = True,
+    work_dir: str | None = None,
 ):
     """Assemble the full HCode v2 agent from environment config."""
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
@@ -87,8 +88,15 @@ async def create_hcode_agent(
 
     model = _build_model()
 
-    # Create backend ONCE -- shared by SummarizationMiddleware and agent
-    backend = LocalShellBackend(virtual_mode=False)
+    # Create backend ONCE — shared by SummarizationMiddleware and agent.
+    # virtual_mode=True anchors the virtual `/` root to work_dir, so the model's
+    # `/calculator.py` resolves to {work_dir}/calculator.py instead of the OS
+    # drive root. Defaults to the current working directory.
+    resolved_work_dir = work_dir or os.getcwd()
+    backend = LocalShellBackend(
+        root_dir=resolved_work_dir,
+        virtual_mode=True,
+    )
 
     middleware = []
     if enable_pev:
@@ -102,11 +110,14 @@ async def create_hcode_agent(
     manager = MCPClientManager(config_path=mcp_config)
     if manager.is_configured:
         try:
-            mcp_tools = await MCPToolRegistry.build_tools(manager)
+            # connect_all() is async; build_tools() is a synchronous static
+            # method returning a list — do NOT await it.
+            await manager.connect_all()
+            mcp_tools = MCPToolRegistry.build_tools(manager)
         except Exception as e:
             logger.warning("MCP failed: %s", e)
 
-    # All 31 tools are ~1213 tokens total -- safe to pass all
+    # All 31 tools are ~1213 tokens total — safe to pass all
     from hcode_v2.tools.registry import get_all_tools
     all_tools = get_all_tools() + mcp_tools
 
