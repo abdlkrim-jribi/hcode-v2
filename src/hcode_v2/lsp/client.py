@@ -48,6 +48,12 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
+def _progress_kind(msg: dict) -> Optional[str]:
+    """Extract ``value.kind`` from a standard ``$/progress`` notification."""
+    value = (msg.get("params") or {}).get("value")
+    return value.get("kind") if isinstance(value, dict) else None
+
+
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
 class LSPError(RuntimeError):
@@ -108,6 +114,14 @@ class LSPClient:
         self._diagnostics: dict[str, list[Diagnostic]] = {}
         self._diag_events: dict[str, asyncio.Event] = {}
         self._versions: dict[str, int] = {}
+
+        # Analysis-progress tracking (pyright/*Progress and standard $/progress).
+        # Lets get_diagnostics wait for the server to finish analysing rather than
+        # mistaking the initial empty push for the final result.  Servers that
+        # report no progress simply leave this idle and fall back to debounce.
+        self._analysis_active = 0
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
 
         self._server_capabilities: dict = {}
         self._started = False
@@ -363,6 +377,17 @@ class LSPClient:
 
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
+
+        # Phase 1 — if the server announces analysis progress, wait for it to go
+        # idle (all diagnostics for this pass published).  Bounded by the
+        # deadline; servers that never report progress fall straight through.
+        while loop.time() < deadline and self._analysis_active > 0:
+            try:
+                await asyncio.wait_for(self._idle_event.wait(), timeout=deadline - loop.time())
+            except asyncio.TimeoutError:
+                break
+
+        # Phase 2 — debounce: return once no newer push arrives within `settle`.
         while True:
             now = loop.time()
             if now >= deadline:
@@ -496,16 +521,33 @@ class LSPClient:
                 else:
                     fut.set_result(msg.get("result"))
             return
+        method = msg.get("method")
         # 2) Pushed diagnostics (notification, no id).
-        if msg.get("method") == "textDocument/publishDiagnostics":
+        if method == "textDocument/publishDiagnostics":
             self._on_publish_diagnostics(msg.get("params") or {})
             return
-        # 3) Server→client request (method + id) we don't implement: reply null so
+        # 3) Analysis-progress notifications — track busy/idle so get_diagnostics
+        #    can wait for the server to finish (pyright/beginProgress..endProgress,
+        #    and standard $/progress begin/end).
+        if method in ("pyright/beginProgress", "window/workDoneProgress/begin") or (
+            method == "$/progress" and _progress_kind(msg) == "begin"
+        ):
+            self._analysis_active += 1
+            self._idle_event.clear()
+            return
+        if method in ("pyright/endProgress", "window/workDoneProgress/end") or (
+            method == "$/progress" and _progress_kind(msg) == "end"
+        ):
+            self._analysis_active = max(0, self._analysis_active - 1)
+            if self._analysis_active == 0:
+                self._idle_event.set()
+            return
+        # 4) Server→client request (method + id) we don't implement: reply null so
         #    the server isn't left waiting (e.g. window/workDoneProgress/create).
         if "method" in msg and "id" in msg:
             self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
             return
-        # 4) Any other server notification (logMessage, progress, …): ignore.
+        # 5) Any other server notification (logMessage, reportProgress, …): ignore.
 
     def _on_publish_diagnostics(self, params: dict) -> None:
         uri = params.get("uri", "")
