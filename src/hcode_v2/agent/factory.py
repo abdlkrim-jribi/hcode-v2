@@ -16,6 +16,7 @@ from deepagents.mcp.bridge import MCPToolRegistry
 from deepagents.mcp.client import MCPClientManager
 
 from hcode_v2.provider.fallback import maybe_wrap
+from hcode_v2.tools.lsp_tools import verify_diagnostics_addendum
 from hcode_v2.utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,9 @@ async def create_hcode_agent(
 
     middleware = []
     if enable_pev:
-        middleware.append(PEVMiddleware())
+        # W3.3: give Verify an LSP diagnostics provider. It self-gates — with no
+        # language server installed it returns None and Verify behaves as before.
+        middleware.append(PEVMiddleware(diagnostics_provider=verify_diagnostics_addendum))
     if enable_safety:
         middleware.append(SafetyGuardMiddleware())
     middleware.append(HCodeSkillsMiddleware(skills_dir=skills_dir))
