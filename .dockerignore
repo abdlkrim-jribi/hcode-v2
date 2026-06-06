@@ -25,7 +25,7 @@ htmlcov/
 .venv/
 venv/
 
-# ── Node / frontend — the backend image does not need the UI ─────────────────
+# ── Node / frontend — node_modules and prior builds are rebuilt in-image ─────
 desktop-app/src-ui/node_modules/
 desktop-app/src-ui/dist/
 desktop-app/src-ui/.vite/
@@ -37,20 +37,18 @@ desktop-app/src-tauri/gen/
 desktop-app/src-tauri/Cargo.lock
 target/
 
-# ── Vendored deepagents: drop its tests/build cruft (source is still copied) ──
+# ── Vendored deepagents: drop its tests/build cruft ──────────────────────────
 libs/deepagents/tests/
 libs/deepagents/deepagents.egg-info/
 libs/deepagents/.venv/
-libs/deepagents/uv.lock
 
 # ── Agent runtime state / local data ─────────────────────────────────────────
 .hcode/sessions/
 workspace/
 
-# ── Docker / editor / OS noise ───────────────────────────────────────────────
-docker/
-Dockerfile*
-.dockerignore
+# ── Editor / OS noise ────────────────────────────────────────────────────────
+# NOTE: docker/ is intentionally NOT ignored — the frontend image COPYs
+# docker/nginx.conf, docker/config.js.template and the entrypoint hook from it.
 .idea/
 .vscode/
 *.log
