@@ -19,6 +19,12 @@ def get_all_tools() -> list[BaseTool]:
         git_status,
     )
     from hcode_v2.tools.interactive import ask_user, confirm, display_panel
+    from hcode_v2.tools.lsp_tools import (
+        check_diagnostics,
+        find_references,
+        goto_definition,
+        hover_info,
+    )
     from hcode_v2.tools.notebook import notebook_edit, notebook_execute, notebook_read
     from hcode_v2.tools.terminal import bash, bash_output, kill_shell, ls, search_output
     from hcode_v2.tools.todo import todo_read, todo_write
@@ -64,4 +70,9 @@ def get_all_tools() -> list[BaseTool]:
         notebook_read,
         notebook_edit,
         notebook_execute,
+        # lsp — optional semantic tools, degrade gracefully if no server (4)
+        check_diagnostics,
+        goto_definition,
+        find_references,
+        hover_info,
     ]
