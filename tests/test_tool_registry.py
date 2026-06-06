@@ -29,13 +29,14 @@ _EXPECTED_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "diff": ("diff_files", "apply_patch"),
     "todo": ("todo_read", "todo_write"),
     "notebook": ("notebook_read", "notebook_edit", "notebook_execute"),
+    "lsp": ("check_diagnostics", "goto_definition", "find_references", "hover_info"),
 }
 
 _EXPECTED_NAMES: set[str] = {name for names in _EXPECTED_BY_CATEGORY.values() for name in names}
-_EXPECTED_COUNT = 31
+_EXPECTED_COUNT = 35
 
 
-def test_registry_loads_all_31_tools() -> None:
+def test_registry_loads_all_35_tools() -> None:
     tools = get_all_tools()
     assert len(tools) == _EXPECTED_COUNT
     assert len(_EXPECTED_NAMES) == _EXPECTED_COUNT  # guards the expectation table itself
