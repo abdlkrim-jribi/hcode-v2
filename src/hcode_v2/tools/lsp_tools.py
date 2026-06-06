@@ -53,7 +53,7 @@ from hcode_v2.tools.base import get_root_dir
 logger = logging.getLogger(__name__)
 
 _UNAVAILABLE_MSG = (
-    "Language server not available — semantic checks skipped. "
+    "Language server not available - semantic checks skipped. "
     "This is optional; install a server to enable them "
     "(e.g. `npm install -g pyright` for Python)."
 )
@@ -197,7 +197,7 @@ def _find_symbol_position(text: str, symbol: str, line: Optional[int]) -> Option
 
 def _format_diagnostics(path: str, diags: list[Diagnostic]) -> str:
     if not diags:
-        return f"No diagnostics — '{path}' is clean."
+        return f"No diagnostics - '{path}' is clean."
     errors = [d for d in diags if d.is_error]
     warnings = [d for d in diags if d.severity == DiagnosticSeverity.WARNING]
     others = [d for d in diags if d not in errors and d not in warnings]
@@ -223,7 +223,8 @@ def _format_diagnostics(path: str, diags: list[Diagnostic]) -> str:
 def _format_locations(symbol: str, locs: list[Location], noun: str) -> str:
     if not locs:
         return f"No {noun} found for '{symbol}'."
-    out = [f"{len(locs)} {noun} for '{symbol}':"]
+    label = noun if len(locs) == 1 else f"{noun}s"
+    out = [f"{len(locs)} {label} for '{symbol}':"]
     for loc in locs:
         rel = _relativize(loc.path)
         out.append(f"  {rel}:{loc.range.start.line + 1}:{loc.range.start.character + 1}")
