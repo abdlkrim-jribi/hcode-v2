@@ -1,0 +1,74 @@
+# HCode v2 — full stack: one `docker compose up` brings up backend + frontend.
+#
+#   docker compose up --build
+#   → open http://localhost:8080
+#
+# MOCK mode (default, no API key): HCODE_MOCK=1 in .env makes the backend daemon
+# emit deterministic events. Switch to LIVE by editing .env (HCODE_MOCK=0 + the
+# HCODE_MODEL_* values). The key is injected at runtime — never baked into an image.
+#
+# Copy .env.docker.example → .env first (.env is gitignored).
+
+services:
+  # ── Backend: JSON-RPC daemon + DeepAgents agent + WebSocket proxy ──────────
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    image: hcode-backend
+    ports:
+      # Host:container. The host port is what the BROWSER dials (see frontend).
+      - "8765:8765"
+    env_file:
+      # Model config + HCODE_MOCK. Secrets live only here, only on the backend.
+      - .env
+    environment:
+      # Proxy bind (the image already defaults these; explicit for clarity).
+      HCODE_WS_HOST: 0.0.0.0
+      HCODE_WS_PORT: "8765"
+    volumes:
+      # The project the agent reads and edits. Host dir ↔ container /workspace.
+      - ./workspace:/workspace
+    healthcheck:
+      # Round-trips a JSON-RPC health request over the WS — same script the
+      # image uses. The frontend waits for this to pass (depends_on below).
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Frontend: static React UI served by nginx ─────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    image: hcode-frontend
+    ports:
+      - "8080:80"
+    environment:
+      # ───────────────────────────────────────────────────────────────────────
+      # CRITICAL: host-vs-container URL.
+      #
+      # This URL is dialed by the USER'S BROWSER, which runs on the HOST — NOT
+      # by the frontend (nginx) container. The browser opens the WebSocket
+      # directly to the backend. So the URL must point at the HOST-MAPPED port:
+      #
+      #     ws://localhost:8765          ✅  reachable from the host browser
+      #     ws://backend:8765            ❌  only resolves INSIDE the compose
+      #                                       network; the browser cannot see it
+      #
+      # `backend` is a Docker DNS name that exists only on the internal bridge
+      # network. The browser has no route to it. Using it is the #1 way this
+      # setup breaks — the UI loads but the WebSocket never connects.
+      # ───────────────────────────────────────────────────────────────────────
+      HCODE_WS_URL: ${HCODE_WS_URL:-ws://localhost:8765}
+      # Optional fully-offline frontend (skips the backend entirely). Empty =
+      # use the real WS path above.
+      VITE_MOCK: ${VITE_MOCK:-}
+    depends_on:
+      backend:
+        # Don't start serving until the backend reports healthy.
+        condition: service_healthy
+    restart: unless-stopped
