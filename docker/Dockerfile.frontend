@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+#
+# HCode v2 — frontend container (static React UI served by nginx).
+#
+# The UI is built once as a LIVE bundle (mock off). The backend WebSocket URL
+# and an optional mock toggle are injected at CONTAINER START via /config.js,
+# so the same image works in any environment without rebuilding.
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.frontend -t hcode-frontend .
+# Run (mock mode, no backend needed):
+#   docker run --rm -p 8080:80 -e VITE_MOCK=true hcode-frontend
+# Run (live, pointed at a backend):
+#   docker run --rm -p 8080:80 -e HCODE_WS_URL=ws://localhost:8765 hcode-frontend
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 — build the static assets with Vite
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:20-slim AS build
+
+WORKDIR /app/desktop-app/src-ui
+
+# Manifests first for layer caching: npm ci re-runs only when deps change.
+COPY desktop-app/src-ui/package.json desktop-app/src-ui/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+# App source, then build. VITE_MOCK=false → live bundle; the WS URL and mock
+# toggle are supplied at runtime via /config.js (window.HCODE_WS_URL / HCODE_MOCK).
+COPY desktop-app/src-ui/ ./
+ENV VITE_MOCK=false
+RUN npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — serve with nginx
+# ─────────────────────────────────────────────────────────────────────────────
+FROM nginx:alpine AS serve
+
+LABEL org.opencontainers.image.title="hcode-v2-frontend" \
+      org.opencontainers.image.description="HCode v2 static React UI (nginx), runtime-configurable WS URL"
+
+# SPA + caching config (replaces the default server block).
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Runtime config: template + an entrypoint hook the nginx image runs before
+# starting nginx. Strip any CR so the shell script runs on Alpine regardless of
+# the host's git autocrlf setting.
+COPY docker/config.js.template /opt/hcode/config.js.template
+COPY docker/40-hcode-config.sh /docker-entrypoint.d/40-hcode-config.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.d/40-hcode-config.sh \
+    && chmod +x /docker-entrypoint.d/40-hcode-config.sh
+
+# Static assets from the build stage.
+COPY --from=build /app/desktop-app/src-ui/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+# No CMD/ENTRYPOINT override: nginx:alpine's entrypoint runs
+# /docker-entrypoint.d/*.sh (including our hook) then execs nginx.

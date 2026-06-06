@@ -1,0 +1,5 @@
+// Generated at container start from environment variables (envsubst).
+// Loaded before the app bundle so bridge.ts can read these globals.
+// Empty values fall through to build-time Vite env, then to mock.
+window.HCODE_WS_URL = "${HCODE_WS_URL}";
+window.HCODE_MOCK = "${VITE_MOCK}";
