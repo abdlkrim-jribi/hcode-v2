@@ -33,7 +33,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from langchain_core.tools import tool
 
@@ -356,3 +356,146 @@ async def hover_info(path: str, symbol: str, line: Optional[int] = None) -> str:
     if hover is None or not hover.value.strip():
         return f"No hover information for '{symbol}' in {path}."
     return f"Hover for '{symbol}':\n{hover.value}"
+
+
+# ── PEV Verify integration (W3.3) ─────────────────────────────────────────────
+#
+# `verify_diagnostics_addendum` is the provider PEVMiddleware calls during the
+# Verify phase. Given the files the agent edited this task, it runs the language
+# server and — ONLY IF real errors exist — returns a prompt addendum listing them
+# so the model emits `ISSUES FOUND` and self-corrects. It is OPTIONAL by
+# construction: no server, no supported files, or no errors -> returns ``None``
+# (PEV Verify then behaves exactly as it does today).
+#
+# ERRORS-ONLY RULE: diagnostics are filtered to ``Diagnostic.is_error`` before
+# anything is returned. Warnings / info / hints can never produce an addendum and
+# so can never trip the PEV error budget on benign findings.
+
+_LSP_VERIFY_EVENT = "lsp_verify"
+
+
+async def _emit_verify_event(payload: dict) -> None:
+    """Dispatch a LangChain custom event so the UI can show LSP-verify progress.
+
+    Surfaces as ``on_custom_event`` (name=``lsp_verify``) in ``astream_events``;
+    the StreamingBridge maps it to a ``task_update``.  Best-effort: outside a
+    runnable/callback context (e.g. unit tests calling the provider directly)
+    this no-ops rather than raising.
+    """
+    try:
+        from langchain_core.callbacks import adispatch_custom_event
+        await adispatch_custom_event(_LSP_VERIFY_EVENT, payload)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break verify
+        logger.debug("lsp_verify custom event not dispatched: %s", exc)
+
+
+def _path_candidates(raw: str, root: Path) -> list[Path]:
+    """Plausible on-disk locations for a path the model passed to a write/edit.
+
+    Handles absolute paths, paths relative to the workspace root, and the
+    virtual-root form (``/calculator.py`` -> ``{root}/calculator.py``) produced by
+    the agent's ``virtual_mode`` backend.
+    """
+    p = Path(raw)
+    cands: list[Path] = []
+    if p.is_absolute():
+        cands.append(p)
+    cands.append(root / p)
+    stripped = str(raw).lstrip("/\\")
+    if stripped:
+        cands.append(root / stripped)
+    cands.append(p)
+    return cands
+
+
+def _resolve_verify_paths(paths: Iterable[str]) -> list[tuple[Path, "object"]]:
+    """Resolve raw edited paths to ``(abspath, config)`` for existing, supported files.
+
+    Unsupported file types and paths that don't resolve on disk are dropped
+    (deduplicated) — the agent edits many things the language server can't check.
+    """
+    root = get_root_dir()
+    out: list[tuple[Path, object]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        for cand in _path_candidates(raw, root):
+            if cand.is_file():
+                key = canonical_key(cand)
+                if key in seen:
+                    break
+                cfg = config_for_path(str(cand))
+                if cfg is not None:
+                    seen.add(key)
+                    out.append((cand, cfg))
+                break
+    return out
+
+
+def _format_verify_addendum(errors_by_file: dict[str, list[Diagnostic]]) -> str:
+    """Render the verify-prompt addendum from per-file error diagnostics."""
+    total = sum(len(v) for v in errors_by_file.values())
+    lines = [
+        "## Language Server Diagnostics (Verify)",
+        "",
+        (
+            f"A language server checked the file(s) you modified and found {total} "
+            "ERROR(S). These are real type/syntax errors, not style warnings. You MUST "
+            "output `ISSUES FOUND:` with a short summary so execution resumes and you can "
+            "fix them. Do NOT output `VERIFIED OK` while these errors remain."
+        ),
+        "",
+    ]
+    for fpath, errs in errors_by_file.items():
+        lines.append(f"### {_relativize(Path(fpath))}")
+        for d in sorted(errs, key=lambda d: (d.line, d.range.start.character)):
+            code = f" [{d.code}]" if d.code else ""
+            lines.append(f"- line {d.line + 1}, col {d.range.start.character + 1}: {d.message}{code}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+async def verify_diagnostics_addendum(paths: Iterable[str]) -> Optional[str]:
+    """PEV-Verify provider: ERROR diagnostics for edited files as a prompt addendum.
+
+    Returns a markdown block to append to the verify prompt **iff** the language
+    server reports one or more ERROR-severity diagnostics in the supported files
+    among *paths*; otherwise returns ``None``.  ``None`` means "no change" — PEV
+    Verify proceeds exactly as it does without LSP.  Never raises.
+
+    Args:
+        paths: File paths the agent edited during this task (as passed to the
+            write/edit tools — absolute, root-relative, or virtual-root form).
+    """
+    try:
+        candidates = _resolve_verify_paths(paths)
+        usable = [(p, cfg) for p, cfg in candidates if lsp_available(cfg.language_id)]
+        if not usable:
+            return None  # no server / no supported files -> behave as today
+
+        await _emit_verify_event({"status": "started", "fileCount": len(usable)})
+
+        errors_by_file: dict[str, list[Diagnostic]] = {}
+        for abspath, cfg in usable:
+            client = await _MANAGER.get_client(cfg.language_id, get_root_dir())
+            if client is None:
+                continue
+            try:
+                await _sync_document(client, abspath)
+                diags = await client.get_diagnostics(abspath)
+            except (LSPError, OSError) as exc:
+                logger.debug("verify diagnostics failed for %s: %s", abspath, exc)
+                continue
+            errors = [d for d in diags if d.is_error]  # ERRORS ONLY
+            if errors:
+                errors_by_file[str(abspath)] = errors
+
+        total = sum(len(v) for v in errors_by_file.values())
+        await _emit_verify_event(
+            {"status": "done", "fileCount": len(usable), "errorCount": total}
+        )
+        if not errors_by_file:
+            return None
+        return _format_verify_addendum(errors_by_file)
+    except Exception as exc:  # noqa: BLE001 — verify must never break on LSP
+        logger.debug("verify_diagnostics_addendum failed: %s", exc)
+        return None
