@@ -126,6 +126,10 @@ export default function App() {
   const [showDiffReview, setShowDiffReview]         = useState(false);
   const [capabilityPanel, setCapabilityPanel]       = useState<null | 'mcp' | 'skills' | 'workflows'>(null);
 
+  // Active skill selected from the Skills panel.
+  // Shown as a chip in AgentPanel; its name is appended to submitted tasks.
+  const [activeSkill, setActiveSkill] = useState<string | null>(null);
+
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('hcode-theme') as 'dark' | 'light') || 'dark'
   );
@@ -249,25 +253,42 @@ export default function App() {
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
   const handleSelectFolder = useCallback(async () => {
-    const dir = await ipc.openFolder();
-    if (dir) {
+    try {
+      const dir = await ipc.openFolder();
+      if (!dir) return; // user cancelled
       dispatch({ type: 'SET_WORK_DIR', dir });
-      const tree = await ipc.listDirectory(dir);
-      dispatch({ type: 'SET_FILE_TREE', tree });
+      dispatch({ type: 'SET_FILE_TREE', tree: [] }); // clear stale tree immediately
+      try {
+        const tree = await ipc.listDirectory(dir);
+        dispatch({ type: 'SET_FILE_TREE', tree });
+      } catch (fsErr) {
+        dispatch({ type: 'SET_LAST_ERROR', message: `Cannot read folder: ${fsErr instanceof Error ? fsErr.message : String(fsErr)}` });
+        dispatch({ type: 'SET_FILE_TREE', tree: [] });
+      }
       setExplorerCollapsed(false);
+    } catch (err) {
+      dispatch({ type: 'SET_LAST_ERROR', message: `Open folder failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }, []);
   selectFolderRef.current = handleSelectFolder;
 
   const handleBrowsePath = useCallback(async (path: string) => {
-    const children = await ipc.listDirectory(path);
-    dispatch({ type: 'SET_FILE_TREE', tree: updateTreeChildren(state.fileTree, path, children) });
+    try {
+      const children = await ipc.listDirectory(path);
+      dispatch({ type: 'SET_FILE_TREE', tree: updateTreeChildren(state.fileTree, path, children) });
+    } catch {
+      // Silently ignore expand errors — the tree item stays collapsed
+    }
   }, [state.fileTree]);
 
   const handleOpenFile = useCallback(async (path: string) => {
-    const content = await ipc.readFile(path);
-    dispatch({ type: 'OPEN_FILE', path, content });
-    setFocus('editor');
+    try {
+      const content = await ipc.readFile(path);
+      dispatch({ type: 'OPEN_FILE', path, content });
+      setFocus('editor');
+    } catch (err) {
+      dispatch({ type: 'SET_LAST_ERROR', message: `Cannot read file: ${err instanceof Error ? err.message : String(err)}` });
+    }
   }, []);
 
   const handleSubmitTask = useCallback(async (task: string, mode: 'planning' | 'fast') => {
@@ -443,7 +464,17 @@ export default function App() {
                   <span className="hcode-agent-title">SKILLS</span>
                   <div className="hcode-agent-actions"><span className="hcode-agent-icon" onClick={() => setCapabilityPanel(null)} title="Back">✕</span></div>
                 </div>
-                <div style={{ flex: 1, overflowY: 'auto' }}><SkillsPanel /></div>
+                <div style={{ flex: 1, overflowY: 'auto' }}>
+                  <SkillsPanel
+                    activeSkill={activeSkill}
+                    onSelect={name => {
+                      setActiveSkill(name);
+                      setCapabilityPanel(null); // return to agent stream view
+                      setAgentCollapsed(false);
+                      setFocus('agent');
+                    }}
+                  />
+                </div>
               </div>
             ) : capabilityPanel === 'workflows' ? (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -464,6 +495,8 @@ export default function App() {
                 onReviewDiffs={handleReviewDiffs}
                 onAbortTask={async () => { await ipc.abortTask(); dispatch({ type: 'CLEAR_ERROR' }); dispatch({ type: 'SET_PHASE', phase: 'idle' }); dispatch({ type: 'CLEAR_STREAMING' }); }}
                 onClearError={() => dispatch({ type: 'CLEAR_ERROR' })}
+                activeSkill={activeSkill}
+                onDismissSkill={() => setActiveSkill(null)}
               />
             )}
           </div>

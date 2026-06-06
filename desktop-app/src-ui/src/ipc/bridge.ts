@@ -266,16 +266,50 @@ export async function disconnectMcpServer(server: string): Promise<void> {
 
 // ── File system ───────────────────────────────────────────────────────────────
 
+/**
+ * Open a native OS folder picker.
+ *
+ * Bypass policy: the folder dialog is a system-UI action that has nothing to
+ * do with agent event mocking.  When the app is running inside the Tauri
+ * native shell we ALWAYS call the real Tauri command, even when VITE_MOCK=true
+ * is baked in (so the rest of the UI can still run in demo/mock mode).
+ *
+ * Outside Tauri (browser dev, WS-proxy launcher) we fall through to the
+ * generic invoke path, which in mock mode returns '/project' as a placeholder.
+ */
 export async function openFolder(): Promise<string | null> {
+    if (isTauri) {
+        // Use real native picker regardless of VITE_MOCK
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<string | null>('open_folder_dialog');
+    }
     return (await getInvoke())('open_folder_dialog') as Promise<string | null>;
 }
+/**
+ * Filesystem bypass policy (same as openFolder):
+ * When running inside the Tauri native shell, always use real Tauri commands
+ * regardless of VITE_MOCK — the filesystem is real, not part of agent mocking.
+ * Outside Tauri (browser, WS-proxy) mock returns [] / '' as placeholders.
+ */
 export async function listDirectory(path: string): Promise<FileEntry[]> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<FileEntry[]>('list_directory', { path });
+    }
     return (await getInvoke())('list_directory', { path }) as Promise<FileEntry[]>;
 }
 export async function readFile(path: string): Promise<string> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<string>('read_file', { path });
+    }
     return (await getInvoke())('read_file', { path }) as Promise<string>;
 }
 export async function writeFile(path: string, content: string): Promise<void> {
+    if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return invoke<void>('write_file', { path, content });
+    }
     return (await getInvoke())('write_file', { path, content }) as Promise<void>;
 }
 

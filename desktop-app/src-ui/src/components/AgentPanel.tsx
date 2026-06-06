@@ -17,6 +17,9 @@ interface AgentPanelProps {
     onReviewDiffs?: () => void;
     onAbortTask?: () => void;
     onClearError?: () => void;
+    /** Skill selected from the Skills panel — shown as a dismissable chip above the composer. */
+    activeSkill?: string | null;
+    onDismissSkill?: () => void;
 }
 
 export default function AgentPanel({
@@ -29,6 +32,8 @@ export default function AgentPanel({
     onReviewDiffs,
     onAbortTask,
     onClearError,
+    activeSkill,
+    onDismissSkill,
 }: AgentPanelProps) {
     const [taskInput, setTaskInput] = useState('');
     const [mode, setMode] = useState<'planning' | 'fast'>('planning');
@@ -53,10 +58,21 @@ export default function AgentPanel({
         if (e.key === 'Enter' && e.ctrlKey) {
             e.preventDefault();
             if (taskInput.trim() && appState.phase !== 'thinking' && appState.phase !== 'executing') {
-                onSubmitTask(taskInput, mode);
-                setTaskInput('');
+                handleSubmit();
             }
         }
+    };
+
+    // Build the final task string, injecting the active skill hint if one is set
+    const handleSubmit = () => {
+        const trimmed = taskInput.trim();
+        if (!trimmed) return;
+        const taskWithSkill = activeSkill
+            ? `${trimmed}\n\n[Preferred skill: ${activeSkill}]`
+            : trimmed;
+        onSubmitTask(taskWithSkill, mode);
+        setTaskInput('');
+        // Keep the skill active across tasks — user dismisses explicitly
     };
 
     // Build unified stream from chat messages
@@ -248,10 +264,32 @@ export default function AgentPanel({
 
             {/* Task Composer */}
             <div className="hcode-composer">
+                {/* Active-skill chip — shown when user selected a skill from the Skills panel */}
+                {activeSkill && (
+                    <div style={{
+                        display: 'flex', alignItems: 'center', gap: 'var(--space-1)',
+                        padding: '2px var(--space-2)', marginBottom: 'var(--space-1)',
+                        background: 'var(--surface-3)', border: '1px solid var(--accent)',
+                        borderRadius: 4, fontSize: 'var(--text-xs)', color: 'var(--accent)',
+                    }}>
+                        <span>🎯</span>
+                        <span style={{ flex: 1 }}>Skill: <strong>{activeSkill}</strong></span>
+                        <button
+                            onClick={onDismissSkill}
+                            title="Remove active skill"
+                            style={{
+                                background: 'none', border: 'none', cursor: 'pointer',
+                                color: 'var(--fg-secondary)', fontSize: 'var(--text-xs)',
+                                padding: '0 2px', lineHeight: 1,
+                            }}
+                        >✕</button>
+                    </div>
+                )}
+
                 <div className="hcode-composer__input-wrapper">
                     <textarea
                         className="hcode-composer__input"
-                        placeholder="Describe your task..."
+                        placeholder={activeSkill ? `Task for skill "${activeSkill}"…` : 'Describe your task...'}
                         value={taskInput}
                         onChange={(e) => setTaskInput(e.target.value)}
                         onKeyDown={handleKeyDown}
@@ -273,8 +311,17 @@ export default function AgentPanel({
                             Fast
                         </button>
                     </div>
-                    <div className="hcode-composer-hint">
-                        Ctrl+Enter to send
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <div className="hcode-composer-hint">
+                            Ctrl+Enter to send
+                        </div>
+                        <button
+                            className="hcode-btn hcode-btn--primary hcode-btn--small"
+                            onClick={handleSubmit}
+                            disabled={!taskInput.trim() || appState.phase === 'thinking' || appState.phase === 'executing'}
+                        >
+                            Run
+                        </button>
                     </div>
                 </div>
             </div>
