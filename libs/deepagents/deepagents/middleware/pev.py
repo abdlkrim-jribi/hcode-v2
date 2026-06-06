@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
 from typing_extensions import TypedDict
 
 from deepagents.middleware._utils import append_to_system_message
+from deepagents.middleware.safety_guard import _FILE_TOOLS as _SAFETY_FILE_TOOLS
 from deepagents.middleware.task_classifier import TaskClassifier
 
 if TYPE_CHECKING:
@@ -16,6 +18,13 @@ if TYPE_CHECKING:
 
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
     from langgraph.runtime import Runtime
+
+    # Optional hook (W3.3): given the files edited this task, return a verify-prompt
+    # addendum if a language server found ERRORS, else None. Injected by the host
+    # app (hcode_v2) so this middleware stays standalone and LSP-agnostic.
+    DiagnosticsProvider = Callable[[list[str]], Awaitable[str | None]]
+
+logger = logging.getLogger(__name__)
 
 _PLAN_PROMPT: str = """\
 ## PEV Planning Phase
@@ -66,6 +75,32 @@ _HASH_WINDOW: int = 5
 _LOOP_THRESHOLD: int = 3
 
 _classifier: TaskClassifier = TaskClassifier()
+
+
+def _collect_modified_files(state: PEVState) -> list[str]:
+    """Files edited this task, read from the message history (W3.3).
+
+    Scans AI ``tool_calls`` for the file-writing tools (the same set SafetyGuard
+    tracks, ``_SAFETY_FILE_TOOLS``) and returns their ``path`` args, de-duplicated
+    in first-seen order.  This is derived from messages — which PEV already has in
+    state — rather than SafetyGuard's ``_safety_modified_files``, because that is
+    only snapshotted in ``after_agent`` (after the loop) and is empty mid-Verify.
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    for msg in state.get("messages", []):
+        if getattr(msg, "type", None) != "ai":
+            continue
+        for tool_call in getattr(msg, "tool_calls", None) or []:
+            name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", None)
+            if name not in _SAFETY_FILE_TOOLS:
+                continue
+            args = tool_call.get("args") if isinstance(tool_call, dict) else getattr(tool_call, "args", None)
+            path = args.get("path") if isinstance(args, dict) else None
+            if path and path not in seen:
+                seen.add(path)
+                files.append(path)
+    return files
 
 
 class PEVState(AgentState):
@@ -123,6 +158,20 @@ class PEVMiddleware(AgentMiddleware):
     """
 
     state_schema = PEVState
+
+    def __init__(self, diagnostics_provider: DiagnosticsProvider | None = None) -> None:
+        """Initialise PEV middleware.
+
+        Args:
+            diagnostics_provider: Optional async callable invoked during the
+                Verify phase with the list of files edited this task.  If it
+                returns a non-empty string, that text is appended to the verify
+                prompt so the model sees concrete errors and self-corrects.
+                When ``None`` (the default), Verify behaves exactly as before —
+                LSP is purely additive and never a precondition.
+        """
+        super().__init__()
+        self._diagnostics_provider = diagnostics_provider
 
     def before_agent(self, state: PEVState, runtime: Runtime) -> dict[str, Any] | None:
         """Classify the task and initialise PEV state before the first model call.
@@ -210,6 +259,12 @@ class PEVMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         """Inject phase context into every asynchronous model call.
 
+        In the Verify phase, additionally run the optional diagnostics provider
+        on the files edited this task and append any ERRORS to the verify prompt
+        (W3.3).  This only augments the prompt — the model still authors
+        ``VERIFIED OK`` / ``ISSUES FOUND``, so markers and circuit breakers are
+        unchanged.  With no provider, this is identical to the original path.
+
         Args:
             request: Model request from the agent loop.
             handler: Next async handler in the middleware chain.
@@ -217,7 +272,34 @@ class PEVMiddleware(AgentMiddleware):
         Returns:
             Model response from the handler.
         """
-        return await handler(self._build_modified_request(request))
+        modified = self._build_modified_request(request)
+        if (
+            self._diagnostics_provider is not None
+            and request.state.get("_pev_phase") == "verify"
+        ):
+            modified = await self._maybe_inject_diagnostics(modified, request)
+        return await handler(modified)
+
+    async def _maybe_inject_diagnostics(
+        self, modified: ModelRequest, request: ModelRequest
+    ) -> ModelRequest:
+        """Append language-server ERRORS to the verify prompt, if any.
+
+        Best-effort: any failure (or no provider result) leaves the request
+        untouched, so Verify degrades to its standard behaviour.
+        """
+        try:
+            files = _collect_modified_files(request.state)
+            if not files:
+                return modified
+            addendum = await self._diagnostics_provider(files)  # type: ignore[misc]
+            if not addendum:
+                return modified
+            new_system_message = append_to_system_message(modified.system_message, addendum)
+            return modified.override(system_message=new_system_message)
+        except Exception:  # noqa: BLE001 — verify must never break on diagnostics
+            logger.debug("LSP verify diagnostics injection skipped", exc_info=True)
+            return modified
 
     def _compute_next_state(self, state: PEVState) -> dict[str, Any]:
         """Derive the next state update from the latest model response.
