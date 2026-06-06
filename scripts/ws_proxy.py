@@ -13,7 +13,17 @@ All sends to a WebSocket go through a per-client asyncio.Queue so
 concurrent sends from daemon_reader and handle_client never race.
 
 Usage:
-    python scripts/ws_proxy.py [--port 1421] [--work-dir PATH]
+    python scripts/ws_proxy.py [--host HOST] [--port PORT] [--work-dir PATH] [--mock]
+
+Bind host/port resolve in this order (first wins):
+    1. --host / --port CLI flags
+    2. $HCODE_WS_HOST / $HCODE_WS_PORT environment variables
+    3. defaults: host "localhost", port 8765
+
+For local dev (scripts/dev.py) the host stays "localhost". The Docker image
+sets HCODE_WS_HOST=0.0.0.0 so the proxy is reachable from the host browser.
+Pass --mock (or set HCODE_MOCK=1) to spawn the daemon with --mock — a fully
+keyless deterministic backend for offline demos and CI.
 """
 
 from __future__ import annotations
@@ -22,13 +32,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
 logger = logging.getLogger("ws_proxy")
 
 
-async def run_proxy(work_dir: str, port: int) -> None:
+async def run_proxy(work_dir: str, host: str, port: int, mock: bool = False) -> None:
     try:
         import websockets
         import websockets.server
@@ -42,6 +53,8 @@ async def run_proxy(work_dir: str, port: int) -> None:
 
     # ── Spawn the daemon subprocess ───────────────────────────────────────────
     daemon_cmd = [sys.executable, "-m", "hcode_v2.daemon", "--work-dir", work_dir]
+    if mock:
+        daemon_cmd.append("--mock")
     logger.info("Starting daemon: %s", " ".join(daemon_cmd))
 
     proc = await asyncio.create_subprocess_exec(
@@ -157,10 +170,10 @@ async def run_proxy(work_dir: str, port: int) -> None:
 
     # ── Start WebSocket server ────────────────────────────────────────────────
     reader_task = asyncio.create_task(daemon_reader())
-    print(f"[ws_proxy] Daemon PID {proc.pid} — ws://localhost:{port}", flush=True)
+    print(f"[ws_proxy] Daemon PID {proc.pid} — ws://{host}:{port}", flush=True)
 
     try:
-        async with websockets.serve(handle_client, "localhost", port):
+        async with websockets.serve(handle_client, host, port):
             await asyncio.Future()  # run until cancelled
     finally:
         reader_task.cancel()
@@ -179,12 +192,25 @@ def main() -> None:
         stream=sys.stderr,
     )
     parser = argparse.ArgumentParser(description="HCode v2 WS ↔ stdio proxy")
-    parser.add_argument("--port", type=int, default=1421, metavar="PORT")
+    parser.add_argument(
+        "--host", default=os.getenv("HCODE_WS_HOST", "localhost"), metavar="HOST",
+        help="Bind host. Defaults to $HCODE_WS_HOST or 'localhost'.",
+    )
+    parser.add_argument(
+        "--port", type=int, default=int(os.getenv("HCODE_WS_PORT", "8765")), metavar="PORT",
+        help="Bind port. Defaults to $HCODE_WS_PORT or 8765.",
+    )
     parser.add_argument("--work-dir", default=".", metavar="DIR")
+    parser.add_argument(
+        "--mock", action="store_true",
+        default=os.getenv("HCODE_MOCK", "").lower() in ("1", "true", "yes"),
+        help="Spawn the daemon with --mock (keyless deterministic backend). "
+             "Also enabled by HCODE_MOCK=1.",
+    )
     args = parser.parse_args()
     work_dir = str(Path(args.work_dir).resolve())
     try:
-        asyncio.run(run_proxy(work_dir, args.port))
+        asyncio.run(run_proxy(work_dir, args.host, args.port, args.mock))
     except KeyboardInterrupt:
         print("\n[ws_proxy] Stopped.", flush=True)
 

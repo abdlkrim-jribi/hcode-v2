@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1
+#
+# HCode v2 — backend container (daemon + agent + WebSocket proxy).
+#
+# Runs headless: the WS proxy binds 0.0.0.0:8765 and spawns the JSON-RPC daemon,
+# which drives the DeepAgents/LangGraph agent. The browser UI (served separately)
+# connects over WebSocket. The agent edits code under /workspace (a mounted volume).
+#
+# Secrets are NEVER baked in. The model API key arrives at runtime via env:
+#   HCODE_MODEL_NAME / HCODE_MODEL_API_KEY / HCODE_MODEL_BASE_URL
+# For a fully keyless demo, run with -e HCODE_MOCK=1.
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.backend -t hcode-backend .
+# Run (mock mode, no key):
+#   docker run --rm -p 8765:8765 -e HCODE_MOCK=1 -v "$PWD/workspace:/workspace" hcode-backend
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 — builder: resolve and install dependencies with uv into /app/.venv
+# ─────────────────────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+# uv: fast, reproducible installer. Pin to a fixed version for reproducible builds.
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_HTTP_TIMEOUT=600 \
+    VIRTUAL_ENV=/app/.venv \
+    PATH=/app/.venv/bin:$PATH
+
+WORKDIR /app
+
+# 1. Dependency manifests + the vendored editable dep (deepagents).
+#    Copied before app source so this layer caches unless deps/deepagents change.
+COPY pyproject.toml uv.lock ./
+COPY libs/deepagents ./libs/deepagents
+
+# 2. Install third-party + deepagents (editable), excluding the dev group and the
+#    root project itself. pytest/pytest-cov are dev-only and stay out of the image.
+#    Cache mount persists uv's download cache across build attempts so flaky/slow
+#    networks converge on retry instead of re-downloading everything.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+
+# 3. Application source, then install the hcode_v2 project itself (fast layer).
+COPY src ./src
+COPY scripts ./scripts
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# 4. The WS proxy needs `websockets` at runtime, but it lives in the dev group.
+#    Install just that one package — not the whole dev group.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "websockets>=12.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — runtime: copy the prepared venv + source, run headless
+# ─────────────────────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+LABEL org.opencontainers.image.title="hcode-v2-backend" \
+      org.opencontainers.image.description="HCode v2 headless backend: daemon + agent + WS proxy"
+
+# Non-root user for the runtime.
+RUN useradd --create-home --uid 1000 hcode
+
+ENV VIRTUAL_ENV=/app/.venv \
+    PATH=/app/.venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    HCODE_WS_HOST=0.0.0.0 \
+    HCODE_WS_PORT=8765 \
+    WORK_DIR=/workspace
+
+WORKDIR /app
+
+# Bring over the venv (with editable links) and the source it points at.
+# Same base image → identical interpreter path, so the venv is valid as-is.
+COPY --from=builder /app /app
+
+# Mounted volume: the codebase the agent reads and edits.
+RUN mkdir -p /workspace && chown -R hcode:hcode /app /workspace
+VOLUME ["/workspace"]
+
+USER hcode
+
+EXPOSE 8765
+
+# Health: a tiny WS client that round-trips a health request to the proxy/daemon.
+# Compose can health-gate the frontend on this.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "scripts/healthcheck.py"]
+
+# The proxy binds $HCODE_WS_HOST:$HCODE_WS_PORT and spawns the daemon against
+# the mounted workspace. --mock is opt-in via HCODE_MOCK=1 (keyless demo).
+CMD ["python", "scripts/ws_proxy.py", "--work-dir", "/workspace"]
