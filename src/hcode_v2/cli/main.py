@@ -9,6 +9,10 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+# Project-local .env (cwd) wins; the repo-root .env stays as a fallback so existing
+# setups — including the daemon — keep working unchanged. load_dotenv does not
+# override already-set vars, so loading cwd first gives it precedence.
+load_dotenv(Path.cwd() / ".env")
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 # Propagate into os.environ so subprocesses inherit them
@@ -24,6 +28,7 @@ from langchain_core.messages import HumanMessage
 
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.display import HCodeDisplay
+from hcode_v2.utils.config import Config
 
 _VERSION = "HCode v2.0.0 — powered by DeepAgents + LangGraph"
 
@@ -467,6 +472,205 @@ def workflow(workflows_dir: str) -> None:
         else []
     )
     display.show_workflows(workflows)
+
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+
+_ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
+
+
+@cli.command()
+@click.option("--workdir", "-w", "-C", default=None,
+              help="Directory to scaffold. Defaults to current directory.")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite an existing .env and .hcode/mcp_config.json.")
+def init(workdir: str | None, force: bool) -> None:
+    """Scaffold an HCode v2 project (.env and the .hcode/ workspace).
+
+    Idempotent by default: an existing .env or mcp_config.json is left untouched.
+    Pass --force to overwrite them.
+    """
+    _validate_workdir(workdir)
+    display = HCodeDisplay()
+    root = Path(workdir) if workdir else Path.cwd()
+
+    created: list[str] = []
+    skipped: list[str] = []
+
+    # .env — copied from the repo's .env.example template (the config carrier).
+    env_path = root / ".env"
+    if env_path.exists() and not force:
+        skipped.append(".env")
+    else:
+        template = _ENV_EXAMPLE.read_text(encoding="utf-8") if _ENV_EXAMPLE.exists() else ""
+        env_path.write_text(template, encoding="utf-8")
+        created.append(".env")
+
+    # Workspace directories the agent reads relative to the working directory.
+    for sub in (".hcode/skills", ".hcode/workflows", ".hcode/sessions"):
+        directory = root / sub
+        if directory.is_dir():
+            skipped.append(sub + "/")
+        else:
+            directory.mkdir(parents=True, exist_ok=True)
+            created.append(sub + "/")
+
+    # MCP config — seeded empty so `hcode mcp add/connect` has a file to edit.
+    mcp_path = root / ".hcode" / "mcp_config.json"
+    if mcp_path.exists() and not force:
+        skipped.append(".hcode/mcp_config.json")
+    else:
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_path.write_text(json.dumps({"servers": {}}, indent=2) + "\n", encoding="utf-8")
+        created.append(".hcode/mcp_config.json")
+
+    display.console.print(f"[bold]Initialised HCode project in[/bold] {root}")
+    for item in created:
+        display.console.print(f"  [green]created[/green] {item}")
+    for item in skipped:
+        display.console.print(f"  [dim]exists [/dim] {item}")
+    if ".env" in created:
+        display.console.print(
+            "\n[yellow]Edit .env to set your model and API key, "
+            "or run `hcode config set ...`.[/yellow]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
+
+# Whitelisted, user-editable model/provider keys. These are the variables the
+# agent actually reads (Config.from_env + the two factory-only keys), persisted
+# to the project-local .env that the CLI loads at startup.
+_CONFIG_KEYS: tuple[str, ...] = (
+    "HCODE_MODEL_NAME",
+    "HCODE_MODEL_API_KEY",
+    "HCODE_MODEL_BASE_URL",
+    "HCODE_TOOLCALL_MODE",
+    "HCODE_MAX_TOKENS",
+    "ANTHROPIC_API_KEY",
+)
+_SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"HCODE_MODEL_API_KEY", "ANTHROPIC_API_KEY"}
+)
+
+
+def _mask_secret(value: str | None) -> str:
+    """Render a secret for display — e.g. ``sk-...****`` — never the full value."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 7:
+        return "****"
+    return f"{value[:3]}...****"
+
+
+def _set_env_value(path: Path, key: str, value: str) -> None:
+    """Write ``KEY=value`` into a .env file, preserving existing lines and comments.
+
+    Updates the key in place if a non-comment assignment already exists, otherwise
+    appends it. Creates the file (and parent directory) when missing.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    new_line = f"{key}={value}"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        if stripped.split("=", 1)[0].strip() == key:
+            lines[i] = new_line
+            break
+    else:
+        lines.append(new_line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@cli.group(name="config")
+def config_cmd() -> None:
+    """View and edit model/provider configuration in the project .env.
+
+    Subcommands:
+      list           Show resolved config (secrets masked)
+      get <KEY>      Print one key's effective value
+      set <KEY> VAL  Write a key to ./.env (takes effect next run)
+    """
+
+
+@config_cmd.command(name="list")
+def config_list() -> None:
+    """Show the resolved model/provider configuration (secrets masked)."""
+    from rich.table import Table
+
+    display = HCodeDisplay()
+    cfg = Config.from_env()
+    rows = [
+        ("HCODE_MODEL_NAME", cfg.model),
+        ("HCODE_MODEL_API_KEY", _mask_secret(cfg.api_key)),
+        ("HCODE_MODEL_BASE_URL", cfg.base_url or "(not set)"),
+        ("HCODE_TOOLCALL_MODE", cfg.toolcall_mode),
+        ("HCODE_MAX_TOKENS", os.getenv("HCODE_MAX_TOKENS", "2000")),
+        ("ANTHROPIC_API_KEY", _mask_secret(os.getenv("ANTHROPIC_API_KEY"))),
+    ]
+    table = Table(title="HCode Configuration")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    for key, value in rows:
+        table.add_row(key, value)
+    display.console.print(table)
+
+
+@config_cmd.command(name="get")
+@click.argument("key")
+def config_get(key: str) -> None:
+    """Print the effective value of a single config KEY (secrets masked)."""
+    display = HCodeDisplay()
+    if key not in _CONFIG_KEYS:
+        display.show_error(
+            f"Unknown config key: '{key}'. "
+            f"Valid keys: {', '.join(_CONFIG_KEYS)}."
+        )
+        sys.exit(1)
+    value = os.getenv(key)
+    if key in _SECRET_CONFIG_KEYS:
+        click.echo(_mask_secret(value))
+    else:
+        click.echo(value if value is not None else "(not set)")
+
+
+@config_cmd.command(name="set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Write KEY=VALUE to the project-local ./.env (takes effect next run)."""
+    display = HCodeDisplay()
+    if key not in _CONFIG_KEYS:
+        display.show_error(
+            f"Unknown config key: '{key}'. "
+            f"Valid keys: {', '.join(_CONFIG_KEYS)}."
+        )
+        sys.exit(1)
+    if key == "HCODE_TOOLCALL_MODE" and value not in ("native", "json", "auto"):
+        display.show_error("HCODE_TOOLCALL_MODE must be one of: native, json, auto.")
+        sys.exit(1)
+    if key == "HCODE_MAX_TOKENS":
+        try:
+            int(value)
+        except ValueError:
+            display.show_error("HCODE_MAX_TOKENS must be an integer.")
+            sys.exit(1)
+
+    env_path = Path(".env")
+    _set_env_value(env_path, key, value)
+    # Reflect into the running process so a follow-up `config get`/`list` is live.
+    os.environ[key] = value
+
+    shown = _mask_secret(value) if key in _SECRET_CONFIG_KEYS else value
+    display.console.print(f"[green]Set {key}={shown} in {env_path}[/green]")
 
 
 # ---------------------------------------------------------------------------
