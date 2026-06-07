@@ -27,7 +27,9 @@ import click
 from langchain_core.messages import HumanMessage
 
 from hcode_v2.agent.factory import create_hcode_agent
+from hcode_v2.cli.banner import render_banner, render_welcome
 from hcode_v2.cli.display import HCodeDisplay
+from hcode_v2.cli.statusline import render_status
 from hcode_v2.utils.config import Config
 
 _VERSION = "HCode v2.0.0 — powered by DeepAgents + LangGraph"
@@ -113,9 +115,17 @@ def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) 
 # ---------------------------------------------------------------------------
 
 
-@click.group()
-def cli() -> None:
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """HCode v2 — autonomous AI coding agent."""
+    # Bare `hcode` (no subcommand): greet with the banner + welcome, then the
+    # normal command help. Subcommands (incl. `version`) run untouched.
+    if ctx.invoked_subcommand is None:
+        display = HCodeDisplay()
+        display.console.print(render_banner())
+        display.console.print(render_welcome())
+        click.echo(ctx.get_help())
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +171,14 @@ def chat(session: str | None, workdir: str | None) -> None:
     _validate_workdir(workdir)
     session_id = session or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     display = HCodeDisplay()
-    model_name = os.getenv("HCODE_MODEL", "gpt-4o-mini")
+
+    # Banner once at session start, then session/working-dir context.
+    display.console.print(render_banner())
+    display.console.print(render_welcome())
     if session:
         click.echo(f"Resuming session: {session_id}")
     else:
         click.echo(f"New session: {session_id}")
-    display.console.print(f"[bold blue]HCode v2 Chat[/bold blue]  (model: {model_name})")
     display.console.print(f"[dim]Working directory: {workdir or os.getcwd()}[/dim]")
     display.console.print("[dim]Type /exit or /quit to end the session.[/dim]\n")
 
@@ -174,6 +186,9 @@ def chat(session: str | None, workdir: str | None) -> None:
         agent = await create_hcode_agent(session_id=session_id, work_dir=workdir)
 
         while True:
+            # Persistent-feel status line: re-rendered just above each prompt.
+            # chat always runs the PEV loop; context% is not yet exposed here.
+            display.console.print(render_status(mode="PEV", workdir=workdir))
             try:
                 user_input = input("you> ").strip()
             except (EOFError, KeyboardInterrupt):
