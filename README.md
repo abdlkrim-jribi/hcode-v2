@@ -29,6 +29,44 @@ The console scripts `hcode` and `hcode_v2` are equivalent entry points.
 
 ---
 
+## Quick start
+
+`uv sync` installs the `hcode` console script into the repo-root `.venv`, but that
+venv is not on your `PATH`, so a bare `hcode` won't be found from a fresh clone.
+Pick whichever of these is most convenient — simplest first:
+
+**1. Activate the venv once (then just `hcode`):**
+
+```powershell
+.venv\Scripts\Activate.ps1   # PowerShell; for cmd use .venv\Scripts\activate.bat
+hcode version
+hcode chat
+hcode run "create hello.py that prints 'hello from hcode v2'"
+```
+
+**2. No activation — use the bundled shim:**
+
+```powershell
+.\scripts\hcode.cmd version            # cmd / PowerShell
+.\scripts\hcode.ps1 chat               # PowerShell
+.\scripts\hcode.cmd run "create hello.py that prints 'hello from hcode v2'"
+```
+
+The shims (`scripts/hcode.cmd`, `scripts/hcode.ps1`) just forward all arguments to
+`.venv\Scripts\hcode.exe`, so they work from a fresh clone as soon as the venv is
+built.
+
+**3. Last resort — the long, fully-qualified form:**
+
+```powershell
+.venv\Scripts\python.exe -m hcode_v2.cli.main version
+```
+
+All three reach the same CLI: `hcode version`, `hcode chat`, and
+`hcode run "<task>"` behave identically.
+
+---
+
 ## Configuration
 
 Configuration is read from environment variables, loaded from a `.env` file at the
