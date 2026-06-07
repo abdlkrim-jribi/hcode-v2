@@ -68,6 +68,46 @@ def _validate_workdir(workdir: str | None) -> None:
         )
 
 
+def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) -> None:
+    """Run a single pre-built TASK through the agent and display the result.
+
+    This is the shared single-shot run path used by ``run``, ``analyze``, and
+    ``explore``: build the agent with ``create_hcode_agent(work_dir=...)``,
+    ``ainvoke`` it with one ``HumanMessage``, and render the final message text.
+    ``analyze``/``explore`` differ from ``run`` only in how they pre-shape
+    ``task`` — the invocation here is identical.
+
+    Args:
+        task: Fully-formed task prompt to send to the agent.
+        workdir: Working directory for file operations, or ``None`` for cwd.
+        enable_pev: Whether to enable the Plan-Execute-Verify loop.
+    """
+    display = HCodeDisplay()
+    display.show_task_header(task)
+    display.console.print(f"[dim]Working directory: {workdir or os.getcwd()}[/dim]")
+
+    async def _invoke() -> str:
+        import datetime
+
+        agent = await create_hcode_agent(enable_pev=enable_pev, work_dir=workdir)
+        thread_id = "run_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=task)]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        messages = result.get("messages", [])
+        if not messages:
+            return "(no response)"
+        return _extract_text(messages[-1].content)
+
+    try:
+        text = asyncio.run(_invoke())
+        display.show_result(text)
+    except Exception as exc:  # noqa: BLE001
+        display.show_error(str(exc))
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # CLI group
 # ---------------------------------------------------------------------------
@@ -91,35 +131,12 @@ def cli() -> None:
               help="Working directory for file operations. Defaults to current directory.")
 def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
     """Run a single TASK and print the result."""
-    display = HCodeDisplay()
     _validate_workdir(workdir)
 
     if fast:
         task = "/fast " + task
 
-    display.show_task_header(task)
-    display.console.print(f"[dim]Working directory: {workdir or os.getcwd()}[/dim]")
-
-    async def _invoke() -> str:
-        import datetime
-
-        agent = await create_hcode_agent(enable_pev=not no_pev, work_dir=workdir)
-        thread_id = "run_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=task)]},
-            config={"configurable": {"thread_id": thread_id}},
-        )
-        messages = result.get("messages", [])
-        if not messages:
-            return "(no response)"
-        return _extract_text(messages[-1].content)
-
-    try:
-        text = asyncio.run(_invoke())
-        display.show_result(text)
-    except Exception as exc:  # noqa: BLE001
-        display.show_error(str(exc))
-        sys.exit(1)
+    _run_agent_task(task, workdir, enable_pev=not no_pev)
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +688,62 @@ def config_set(key: str, value: str) -> None:
 
     shown = _mask_secret(value) if key in _SECRET_CONFIG_KEYS else value
     display.console.print(f"[green]Set {key}={shown} in {env_path}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# analyze
+# ---------------------------------------------------------------------------
+
+
+def _build_analyze_task(path: str, deep: bool) -> str:
+    """Build the analyze prompt for PATH, optionally requesting a deeper review."""
+    task = (
+        f"Analyze the code at {path}. "
+        "Report structure, key risks, and concrete improvements."
+    )
+    if deep:
+        task += (
+            " Go deeper: trace the key control and data flows, inspect edge cases "
+            "and error handling, and cite specific files and line references."
+        )
+    return task
+
+
+@cli.command()
+@click.argument("path", default=".")
+@click.option("--deep", is_flag=True, default=False,
+              help="Request a deeper, more thorough review.")
+@click.option("--workdir", "-w", "-C", default=None,
+              help="Working directory for file operations. Defaults to current directory.")
+def analyze(path: str, deep: bool, workdir: str | None) -> None:
+    """Analyze the code at PATH (default '.') — structure, risks, improvements."""
+    _validate_workdir(workdir)
+    task = _build_analyze_task(path, deep)
+    _run_agent_task(task, workdir)
+
+
+# ---------------------------------------------------------------------------
+# explore
+# ---------------------------------------------------------------------------
+
+
+def _build_explore_task(query: str) -> str:
+    """Build the explore prompt that answers QUERY from the codebase."""
+    return (
+        f"Explore this codebase to answer: {query}. "
+        "Search the relevant files and summarize findings with file references."
+    )
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--workdir", "-w", "-C", default=None,
+              help="Working directory for file operations. Defaults to current directory.")
+def explore(query: str, workdir: str | None) -> None:
+    """Explore the codebase to answer QUERY, with file references."""
+    _validate_workdir(workdir)
+    task = _build_explore_task(query)
+    _run_agent_task(task, workdir)
 
 
 # ---------------------------------------------------------------------------
