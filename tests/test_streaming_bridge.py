@@ -196,6 +196,41 @@ def test_unknown_event_kind_ignored():
     assert emitted == []
 
 
+# ── Unit: lsp_verify custom event (W3.3) ──────────────────────────────────────
+
+def _custom(name: str, data: dict) -> dict:
+    return {"event": "on_custom_event", "name": name, "data": data}
+
+
+def test_lsp_verify_started_emits_task_update():
+    bridge, emitted = _make_bridge()
+    bridge.process_event(_custom("lsp_verify", {"status": "started", "fileCount": 2}))
+    updates = [p for t, p in emitted if t == "task_update"]
+    assert updates and updates[0]["step"] == "lsp_verify:started"
+    assert "language server" in updates[0]["markdown"].lower()
+
+
+def test_lsp_verify_done_with_errors_emits_task_update():
+    bridge, emitted = _make_bridge()
+    bridge.process_event(_custom("lsp_verify", {"status": "done", "errorCount": 3, "fileCount": 1}))
+    update = next(p for t, p in emitted if t == "task_update")
+    assert update["step"] == "lsp_verify:errors"
+    assert "3 error" in update["markdown"]
+
+
+def test_lsp_verify_done_clean_emits_task_update():
+    bridge, emitted = _make_bridge()
+    bridge.process_event(_custom("lsp_verify", {"status": "done", "errorCount": 0, "fileCount": 1}))
+    update = next(p for t, p in emitted if t == "task_update")
+    assert update["step"] == "lsp_verify:clean"
+
+
+def test_unknown_custom_event_ignored():
+    bridge, emitted = _make_bridge()
+    bridge.process_event(_custom("some_other_event", {"foo": "bar"}))
+    assert emitted == []
+
+
 # ── Integration: daemon mock streaming ───────────────────────────────────────
 
 def _start_daemon(tmp_path: Path) -> subprocess.Popen:

@@ -102,6 +102,8 @@ class StreamingBridge:
                 self._handle_tool_start(name, data)
             elif kind == "on_tool_end":
                 self._handle_tool_end(name, data)
+            elif kind == "on_custom_event":
+                self._handle_custom_event(name, data)
             # on_chain_*, on_chat_model_start/end, on_retriever_* — not mapped in C2
         except Exception:
             logger.exception("bridge error processing event kind=%s name=%s", kind, name)
@@ -178,3 +180,35 @@ class StreamingBridge:
         })
         self._active_tool = None
         self._active_tool_input = None
+
+    # ── Custom events (app-dispatched via adispatch_custom_event) ──────────────
+
+    def _handle_custom_event(self, name: str, data: dict) -> None:
+        """Map app custom events to UI notifications.
+
+        Currently handles ``lsp_verify`` (W3.3): the PEV Verify phase running the
+        language server on edited files.  Rendered as ``task_update`` lines so the
+        UI shows "Verifying with language server…" and the outcome.
+        """
+        if name != "lsp_verify":
+            return
+        payload = data or {}
+        status = payload.get("status")
+        if status == "started":
+            count = payload.get("fileCount", 0)
+            self._emit("task_update", {
+                "markdown": f"**Verifying with language server** ({count} file(s))…",
+                "step": "lsp_verify:started",
+            })
+        elif status == "done":
+            errors = payload.get("errorCount", 0)
+            if errors:
+                self._emit("task_update", {
+                    "markdown": f"**Language server found {errors} error(s)** — looping back to fix.",
+                    "step": "lsp_verify:errors",
+                })
+            else:
+                self._emit("task_update", {
+                    "markdown": "**Language server check passed** — no errors.",
+                    "step": "lsp_verify:clean",
+                })
