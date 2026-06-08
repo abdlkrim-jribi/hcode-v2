@@ -81,7 +81,7 @@ def render_status(
     branch = _git_branch(workdir)
     if branch:
         line.append(_SEPARATOR, style="dim")
-        line.append(f"⎇ {branch}", style="magenta")
+        line.append(f"branch: {branch}", style="magenta")
 
     if mode:
         line.append(_SEPARATOR, style="dim")
