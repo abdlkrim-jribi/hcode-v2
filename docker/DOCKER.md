@@ -103,7 +103,20 @@ The frontend serves the UI; the **browser** then opens a WebSocket straight to t
 
 ---
 
-## 6. Operating the stack
+## 6. Semantic verification (LSP)
+
+The backend image bundles a **language server** so the agent can verify its own code *semantically* — not just by reading tool output, but by type- and syntax-checking the files it edited. During the **Verify** phase, the agent runs the language server on the files it changed this task; if there are **errors**, they are fed back and the agent loops to fix them (self-correction).
+
+- **Supported today: Python**, via [pyright](https://github.com/microsoft/pyright) — pinned to **`1.1.410`** to match what was tested in local dev, so container diagnostics are identical. The client is language-agnostic; other servers (TypeScript, Rust, Go) are added as configuration, not new code.
+- **Errors only.** Only true type/syntax **errors** trigger a re-execution. Warnings and style hints are reported but never cause a loop, so the agent never churns on benign findings.
+- **No key, no network.** The language server runs entirely **locally inside the container** — no API key, no internet. It works in mock mode and in air-gapped deployments.
+- **Optional by design — graceful degradation.** LSP is an *additional* signal, never a precondition. For a file type with no configured server, Verify behaves exactly as it does without it. The image ships pyright on `PATH`, so it is **on** by default for Python; to build a leaner image without it, drop the `lsp` stage and its two `COPY` lines from `docker/Dockerfile.backend` — the agent detects the missing server and Verify falls back to its text-only behaviour with **zero regression**.
+
+This costs **~120 MB** in the backend image (the Node runtime + pyright): roughly **311 MB → 429 MB**.
+
+---
+
+## 7. Operating the stack
 
 | Action | Command |
 |---|---|
@@ -119,7 +132,7 @@ The frontend is **gated** on the backend: Compose starts `frontend` only after `
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 **Port already in use (`8080` or `8765`)**
 Another process holds the port. Either stop it, or remap in `docker-compose.yml`:
@@ -145,7 +158,7 @@ The backend container isn't up or isn't healthy yet. `docker compose ps`; wait f
 
 ---
 
-## 8. Security notes
+## 9. Security notes
 
 - **The API key is runtime-only.** It is supplied via `.env` / environment at container start and is **never baked into any image**. You can publish or share the images without leaking credentials.
 - **`.env` is gitignored** and excluded from the Docker build context (`.dockerignore`) — it cannot end up in version control or inside an image.
@@ -155,7 +168,7 @@ The backend container isn't up or isn't healthy yet. `docker compose ps`; wait f
 
 ---
 
-## 9. Verification checklist (zero → working, clean machine)
+## 10. Verification checklist (zero → working, clean machine)
 
 Run these in order on a machine that has **only Docker** installed. Each step has a concrete pass condition.
 
@@ -167,14 +180,15 @@ Run these in order on a machine that has **only Docker** installed. Each step ha
 4. `docker compose ps` → `backend` is `Up (healthy)`, `frontend` is `Up`. *(both running)*
 5. Open `http://localhost:8080` → the HCode UI loads (Explorer, Agent panel, task box). *(frontend served)*
 6. Type a task (e.g. "create a hello.py file") and submit → the Agent panel streams **Plan → Execute → Verify** with a plan card and a diff. *(full path: browser → frontend → ws://localhost:8765 → backend → mock daemon)*
+7. *(Optional, LSP)* `docker compose exec backend pyright --version` → `pyright 1.1.410`. *(the language server is bundled and on `PATH`, so Verify can semantically check Python — see §6)*
 
 **Switch to live (with a key):**
 
-7. `docker compose down`; in `.env` set `HCODE_MOCK=0` and fill `HCODE_MODEL_NAME` / `HCODE_MODEL_API_KEY` / `HCODE_MODEL_BASE_URL`; put real code in `./workspace/`.
-8. `docker compose up` → repeat steps 4–6; the agent now performs the task for real and the edits appear under `./workspace/` on the host. *(live model + persistent edits)*
+8. `docker compose down`; in `.env` set `HCODE_MOCK=0` and fill `HCODE_MODEL_NAME` / `HCODE_MODEL_API_KEY` / `HCODE_MODEL_BASE_URL`; put real code in `./workspace/`.
+9. `docker compose up` → repeat steps 4–6; the agent now performs the task for real and the edits appear under `./workspace/` on the host. *(live model + persistent edits)*
 
 ---
 
-## 10. Offline / air-gapped delivery
+## 11. Offline / air-gapped delivery
 
 For a security-conscious or disconnected environment, build the images once on a connected machine, then ship them as files — no registry, no internet on the target host. See **`scripts/build-images.sh`** and the `docker save` / `docker load` instructions in that script's header.
