@@ -10,6 +10,11 @@
 #   HCODE_MODEL_NAME / HCODE_MODEL_API_KEY / HCODE_MODEL_BASE_URL
 # For a fully keyless demo, run with -e HCODE_MOCK=1.
 #
+# LSP (W3.4): the image bundles the pyright language server so the PEV Verify
+# phase can semantically check Python the agent writes (the W3 self-correction
+# feature). LSP is OPTIONAL — if the server were absent, Verify degrades to its
+# text-only behaviour with no regression — but here it is present and on PATH.
+#
 # Build (from repo root):
 #   docker build -f docker/Dockerfile.backend -t hcode-backend .
 # Run (mock mode, no key):
@@ -55,7 +60,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install "websockets>=12.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — runtime: copy the prepared venv + source, run headless
+# Stage 2 — lsp: install the pyright language server (Node) for in-container Verify
+#
+# pyright is pinned to match local dev (1.1.410) so container diagnostics are
+# identical to what was tested locally.  node:20-trixie-slim shares the SAME
+# Debian base (trixie) as python:3.12-slim, so the copied `node` binary runs
+# against the runtime's glibc without a cross-base mismatch.  Only the node
+# binary (~95 MB) and the pyright package (~37 MB) are copied into the final
+# image; this whole stage is discarded.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:20-trixie-slim AS lsp
+
+ARG PYRIGHT_VERSION=1.1.410
+RUN npm install -g "pyright@${PYRIGHT_VERSION}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — runtime: copy the prepared venv + source + pyright, run headless
 # ─────────────────────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
@@ -78,6 +98,15 @@ WORKDIR /app
 # Bring over the venv (with editable links) and the source it points at.
 # Same base image → identical interpreter path, so the venv is valid as-is.
 COPY --from=builder /app /app
+
+# pyright language server (optional LSP-backed Verify). Copy the node binary and
+# the pyright package, then recreate the npm bin shims (they are relative
+# symlinks). `shutil.which("pyright-langserver")` on PATH resolves these so the
+# LSP client can spawn the server; node on PATH satisfies the shim's shebang.
+COPY --from=lsp /usr/local/bin/node /usr/local/bin/node
+COPY --from=lsp /usr/local/lib/node_modules/pyright /usr/local/lib/node_modules/pyright
+RUN ln -sf ../lib/node_modules/pyright/langserver.index.js /usr/local/bin/pyright-langserver \
+ && ln -sf ../lib/node_modules/pyright/index.js /usr/local/bin/pyright
 
 # Mounted volume: the codebase the agent reads and edits.
 RUN mkdir -p /workspace && chown -R hcode:hcode /app /workspace
