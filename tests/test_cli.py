@@ -586,3 +586,176 @@ def test_chat_plain_message_goes_to_agent(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert len(agent.calls) == 1
     assert agent.calls[0]["messages"][0].content == "hello there"
+
+
+def test_chat_shows_final_text_from_stream(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.chdir(tmp_path)
+    events = [
+        {"event": "on_chat_model_end",
+         "data": {"output": SimpleNamespace(content="hi back")}},
+    ]
+    result, agent = _run_chat_with_inputs(monkeypatch, ["hello", "/exit"], events=events)
+    assert result.exit_code == 0, result.output
+    assert "hi back" in result.output
+
+
+# --- live turn renderer ------------------------------------------------------
+#
+# Unit tests for LiveTurnRenderer: feed synthetic raw astream_events dicts, no
+# real agent, no TTY (recording console), no network. The live-region content
+# is asserted via renderable() since non-terminal consoles render Live lazily.
+
+
+from types import SimpleNamespace  # noqa: E402
+
+from rich.console import Console as RichConsole  # noqa: E402
+
+from hcode_v2.cli.live import LiveTurnRenderer  # noqa: E402
+
+
+def _token_event(text: str) -> dict:
+    return {
+        "event": "on_chat_model_stream",
+        "data": {"chunk": SimpleNamespace(content=text)},
+    }
+
+
+def _render(renderer: LiveTurnRenderer, console: RichConsole) -> str:
+    console.print(renderer.renderable())
+    return console.export_text()
+
+
+def test_live_renders_plan_panel_on_marker() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_token_event("1. Add the endpoint. 2. Test it. "))
+        renderer.process_event(_token_event("PLAN COMPLETE"))
+    out = console.export_text()
+    assert "Plan" in out
+    assert "Add the endpoint" in out
+
+
+def test_live_renders_plan_only_once() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_token_event("the plan PLAN COMPLETE"))
+        renderer.process_event(_token_event("more text PLAN COMPLETE again"))
+    assert console.export_text().count("Plan ") == 1 or console.export_text().count("─ Plan ─") == 1
+
+
+def test_live_checklist_from_hcode_todo_write() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event({
+        "event": "on_tool_start",
+        "name": "todo_write",
+        "data": {"input": {"todos": [
+            {"text": "write tests", "done": False},
+            {"text": "fix bug", "done": True},
+        ]}},
+    })
+    out = _render(renderer, console)
+    assert "[ ] write tests" in out
+    assert "[x] fix bug" in out
+
+
+def test_live_checklist_from_deepagents_write_todos() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event({
+        "event": "on_tool_start",
+        "name": "write_todos",
+        "data": {"input": {"todos": [
+            {"content": "scaffold module", "status": "completed"},
+            {"content": "wire it up", "status": "in_progress"},
+            {"content": "add tests", "status": "pending"},
+        ]}},
+    })
+    out = _render(renderer, console)
+    assert "[x] scaffold module" in out
+    assert "[>] wire it up" in out
+    assert "[ ] add tests" in out
+
+
+def test_live_shows_and_clears_running_tool() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event({"event": "on_tool_start", "name": "read_file", "data": {"input": {}}})
+    assert "running read_file" in _render(renderer, console)
+    renderer.process_event({"event": "on_tool_end", "name": "read_file", "data": {}})
+    fresh = RichConsole(record=True, width=100)
+    assert "running read_file" not in _render(renderer, fresh)
+
+
+def test_live_captures_final_text() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event({
+        "event": "on_chat_model_end",
+        "data": {"output": SimpleNamespace(content="All done.")},
+    })
+    assert renderer.final_text == "All done."
+
+
+def test_live_full_synthetic_turn() -> None:
+    # plan + todo_write + tool + done, end to end through the context manager.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_token_event("Plan: do the thing. PLAN COMPLETE"))
+        renderer.process_event({
+            "event": "on_tool_start",
+            "name": "todo_write",
+            "data": {"input": {"todos": [{"text": "do the thing", "done": False}]}},
+        })
+        renderer.process_event({"event": "on_tool_end", "name": "todo_write", "data": {}})
+        renderer.process_event(_token_event("doing it... EXECUTION COMPLETE"))
+        renderer.process_event({
+            "event": "on_chat_model_end",
+            "data": {"output": SimpleNamespace(content="Done: the thing.")},
+        })
+    out = console.export_text() + _render(renderer, console)
+    assert "do the thing" in out
+    assert renderer.final_text == "Done: the thing."
+
+
+def test_live_trivial_turn_renders_nothing_extra() -> None:
+    # fast path: no plan marker, no todos — no panel, no checklist, no error.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_token_event("just a quick answer"))
+        renderer.process_event({
+            "event": "on_chat_model_end",
+            "data": {"output": SimpleNamespace(content="quick answer")},
+        })
+    out = console.export_text()
+    assert "Plan" not in out
+    assert "[x]" not in out and "[ ]" not in out
+    assert renderer.final_text == "quick answer"
+
+
+def test_live_never_raises_on_malformed_events() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    malformed = [
+        {},
+        {"event": "on_chat_model_stream"},
+        {"event": "on_chat_model_stream", "data": {}},
+        {"event": "on_chat_model_stream", "data": {"chunk": None}},
+        {"event": "on_tool_start"},
+        {"event": "on_tool_start", "name": "todo_write", "data": {"input": "garbage"}},
+        {"event": "on_tool_start", "name": "todo_write", "data": {"input": {"todos": "garbage"}}},
+        {"event": "on_tool_start", "name": "write_todos", "data": {"input": {"todos": [{"status": "pending"}]}}},
+        {"event": "on_chat_model_end", "data": {}},
+        {"event": "on_chat_model_end", "data": {"output": None}},
+        {"event": "something_unknown", "data": {"x": 1}},
+    ]
+    with renderer:
+        for event in malformed:
+            renderer.process_event(event)
+    assert renderer.final_text == ""
