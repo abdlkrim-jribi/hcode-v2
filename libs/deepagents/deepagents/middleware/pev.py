@@ -29,10 +29,13 @@ logger = logging.getLogger(__name__)
 _PLAN_PROMPT: str = """\
 ## PEV Planning Phase
 
-Produce a clear, numbered plan covering every step required to complete the task.
-Be specific: name files, tools, and values you intend to use.
+You are in the PLANNING phase. No tools are available; do NOT attempt any \
+action and do NOT write code.
 
-When your plan is ready, output this marker alone on its own line:
+Respond with a NUMBERED step-by-step plan. Every step names the exact file(s) \
+it touches and the tool(s) it will use.
+
+You MUST end your response with this exact line, alone on its own line:
 PLAN COMPLETE"""
 
 _EXECUTE_PROMPT: str = """\
