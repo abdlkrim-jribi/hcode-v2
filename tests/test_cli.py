@@ -526,18 +526,20 @@ class _FakePromptSession:
 
 
 class _FakeAgent:
-    """Records ainvoke calls; returns an empty message list."""
+    """Records astream_events calls; replays a scripted raw event stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, events: list[dict] | None = None) -> None:
         self.calls: list[dict] = []
+        self._events = events or []
 
-    async def ainvoke(self, payload: dict, config: dict | None = None) -> dict:
+    async def astream_events(self, payload: dict, config: dict | None = None, version: str = "v2"):
         self.calls.append(payload)
-        return {"messages": []}
+        for event in self._events:
+            yield event
 
 
-def _run_chat_with_inputs(monkeypatch, inputs: list[str]) -> tuple:
-    agent = _FakeAgent()
+def _run_chat_with_inputs(monkeypatch, inputs: list[str], events: list[dict] | None = None) -> tuple:
+    agent = _FakeAgent(events)
 
     async def fake_create_agent(**_kwargs):
         return agent
