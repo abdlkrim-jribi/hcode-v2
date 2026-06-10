@@ -214,14 +214,15 @@ class PEVMiddleware(AgentMiddleware):
         return self.before_agent(state, runtime)
 
     def _build_modified_request(self, request: ModelRequest) -> ModelRequest:
-        """Inject the phase prompt and, for verify, restrict tools to read-only.
+        """Inject the phase prompt and restrict tools per phase.
 
         Args:
             request: Incoming model request.
 
         Returns:
             Modified model request with phase prompt appended and, in the
-            ``verify`` phase, tools filtered to the read-only set.
+            ``plan`` phase, no tools bound; in the ``verify`` phase, tools
+            filtered to the read-only set.
         """
         phase: str = request.state.get("_pev_phase", "fast")
         phase_prompt = _PHASE_PROMPTS.get(phase)
@@ -229,6 +230,12 @@ class PEVMiddleware(AgentMiddleware):
         new_system_message = request.system_message
         if phase_prompt:
             new_system_message = append_to_system_message(request.system_message, phase_prompt)
+
+        if phase == "plan" and request.tools:
+            # Plan phase binds NO tools: with tools available the model acts
+            # instead of planning and never emits PLAN COMPLETE. Execution
+            # gets the full toolset back after the marker.
+            return request.override(system_message=new_system_message, tools=[])
 
         if phase == "verify" and request.tools:
             filtered = [t for t in request.tools if getattr(t, "name", None) in _VERIFY_READONLY_TOOLS]
