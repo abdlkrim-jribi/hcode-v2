@@ -396,3 +396,191 @@ def test_version_is_exactly_the_one_liner() -> None:
     result = runner.invoke(cli, ["version"])
     assert result.exit_code == 0
     assert result.output.strip() == cli_main._VERSION
+
+
+# --- chat input completion --------------------------------------------------
+#
+# Pure unit tests against the completers: build a prompt_toolkit Document and
+# collect the offered completions. No TTY, no event loop, no network.
+
+
+from prompt_toolkit.document import Document  # noqa: E402
+
+from hcode_v2.cli.completion import (  # noqa: E402
+    CHAT_COMMANDS,
+    PHRASES,
+    FilePathCompleter,
+    PhraseCompleter,
+    SlashCommandCompleter,
+    build_chat_completer,
+    build_chat_session,
+)
+
+
+def _completions(completer, text: str) -> list[str]:
+    """Collect completion texts for `text` with the cursor at the end."""
+    document = Document(text, cursor_position=len(text))
+    return [c.text for c in completer.get_completions(document, None)]
+
+
+def test_chat_commands_catalog_matches_wired_dispatch() -> None:
+    # The completer must offer exactly what the chat loop dispatches — no
+    # dead entries (e.g. /help comes only when it is wired in C4).
+    assert set(CHAT_COMMANDS) == {"/exit", "/quit", "/skills", "/workflows"}
+
+
+def test_slash_completer_offers_skills_for_sk_prefix() -> None:
+    assert _completions(SlashCommandCompleter(), "/sk") == ["/skills"]
+
+
+def test_slash_completer_offers_all_commands_on_bare_slash() -> None:
+    assert set(_completions(SlashCommandCompleter(), "/")) == set(CHAT_COMMANDS)
+
+
+def test_slash_completer_silent_after_first_word_or_without_slash() -> None:
+    completer = SlashCommandCompleter()
+    assert _completions(completer, "/skills now") == []
+    assert _completions(completer, "hello") == []
+
+
+def test_file_completer_offers_matching_paths(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# readme\n", encoding="utf-8")
+    completer = FilePathCompleter(root_dir=str(tmp_path))
+    assert _completions(completer, "look at src/") == ["src/app.py"]
+    assert _completions(completer, "src/ap") == ["src/app.py"]
+
+
+def test_file_completer_handles_at_references(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# readme\n", encoding="utf-8")
+    completer = FilePathCompleter(root_dir=str(tmp_path))
+    assert _completions(completer, "summarize @REA") == ["@README.md"]
+
+
+def test_file_completer_skips_ignored_dirs_and_plain_words(tmp_path: Path) -> None:
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "pkg.js").write_text("x\n", encoding="utf-8")
+    (tmp_path / "keep.txt").write_text("x\n", encoding="utf-8")
+    completer = FilePathCompleter(root_dir=str(tmp_path))
+    # ignored directory contents are never offered
+    assert _completions(completer, "node_modules/") == []
+    # a bare word (no separator, no @) is not treated as a path
+    assert _completions(completer, "keep") == []
+
+
+def test_phrase_completer_offers_curated_phrase() -> None:
+    offered = _completions(PhraseCompleter(), "fix")
+    assert "fix the bug in" in offered
+    assert all(phrase in PHRASES for phrase in offered)
+
+
+def test_phrase_completer_silent_on_commands_and_short_input() -> None:
+    completer = PhraseCompleter()
+    assert _completions(completer, "/fix") == []
+    assert _completions(completer, "f") == []
+
+
+def test_merged_completer_routes_each_kind(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("x\n", encoding="utf-8")
+    completer = build_chat_completer(work_dir=str(tmp_path))
+    assert "/skills" in _completions(completer, "/sk")
+    assert "fix the bug in" in _completions(completer, "fix")
+    assert "@main.py" in _completions(completer, "@ma")
+
+
+def test_build_chat_session_creates_history_dir(tmp_path: Path) -> None:
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    history = tmp_path / ".hcode" / "chat_history.txt"
+    # Pipe input + dummy output so no real terminal is required.
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            session = build_chat_session(
+                work_dir=str(tmp_path), history_path=str(history)
+            )
+    assert history.parent.is_dir()
+    assert session.auto_suggest is not None
+    assert session.completer is not None
+
+
+# --- chat slash-command dispatch --------------------------------------------
+#
+# Confirms the four wired commands still dispatch exactly as before with the
+# prompt_toolkit input layer in place. The agent factory and the prompt
+# session are both replaced with fakes: no network, no TTY.
+
+
+class _FakePromptSession:
+    """Replays scripted inputs through prompt_async, then EOF."""
+
+    def __init__(self, inputs: list[str]) -> None:
+        self._inputs = list(inputs)
+
+    async def prompt_async(self, _message: str) -> str:
+        if not self._inputs:
+            raise EOFError
+        return self._inputs.pop(0)
+
+
+class _FakeAgent:
+    """Records ainvoke calls; returns an empty message list."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def ainvoke(self, payload: dict, config: dict | None = None) -> dict:
+        self.calls.append(payload)
+        return {"messages": []}
+
+
+def _run_chat_with_inputs(monkeypatch, inputs: list[str]) -> tuple:
+    agent = _FakeAgent()
+
+    async def fake_create_agent(**_kwargs):
+        return agent
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    monkeypatch.setattr(
+        cli_main, "build_chat_session", lambda **_kwargs: _FakePromptSession(inputs)
+    )
+    result = runner.invoke(cli, ["chat"])
+    return result, agent
+
+
+def test_chat_exit_and_quit_end_session_without_agent_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for command in ("/exit", "/quit"):
+        result, agent = _run_chat_with_inputs(monkeypatch, [command])
+        assert result.exit_code == 0, result.output
+        assert "Goodbye." in result.output
+        assert agent.calls == []
+
+
+def test_chat_skills_and_workflows_dispatch_locally(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    skill_dir = tmp_path / ".hcode" / "skills" / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# my-skill\n", encoding="utf-8")
+    workflow_dir = tmp_path / ".hcode" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "ship-it.md").write_text("# ship-it\n", encoding="utf-8")
+
+    result, agent = _run_chat_with_inputs(monkeypatch, ["/skills", "/workflows", "/exit"])
+    assert result.exit_code == 0, result.output
+    assert "my-skill" in result.output
+    assert "ship-it" in result.output
+    # Local commands never reach the agent.
+    assert agent.calls == []
+
+
+def test_chat_plain_message_goes_to_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result, agent = _run_chat_with_inputs(monkeypatch, ["hello there", "/exit"])
+    assert result.exit_code == 0, result.output
+    assert len(agent.calls) == 1
+    assert agent.calls[0]["messages"][0].content == "hello there"
