@@ -10,6 +10,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-openai>=0.3",
     "langchain-anthropic>=0.3",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]

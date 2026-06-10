@@ -28,6 +28,7 @@ from langchain_core.messages import HumanMessage
 
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.banner import render_banner, render_welcome
+from hcode_v2.cli.completion import build_chat_session
 from hcode_v2.cli.display import HCodeDisplay
 from hcode_v2.cli.statusline import render_status
 from hcode_v2.utils.config import Config
@@ -184,13 +185,16 @@ def chat(session: str | None, workdir: str | None) -> None:
 
     async def _chat_loop() -> None:
         agent = await create_hcode_agent(session_id=session_id, work_dir=workdir)
+        # Input layer: completion (slash commands, file paths, phrases),
+        # FileHistory + auto-suggest. Dispatch below is unchanged.
+        prompt_session = build_chat_session(work_dir=workdir)
 
         while True:
             # Persistent-feel status line: re-rendered just above each prompt.
             # chat always runs the PEV loop; context% is not yet exposed here.
             display.console.print(render_status(mode="PEV", workdir=workdir))
             try:
-                user_input = input("you> ").strip()
+                user_input = (await prompt_session.prompt_async("you> ")).strip()
             except (EOFError, KeyboardInterrupt):
                 display.console.print("\n[dim]Session ended.[/dim]")
                 break
