@@ -253,6 +253,24 @@ class TestPEVMiddlewarePromptInjection:
         assert captured is not None
         assert len(captured.tools) == 3
 
+    def test_plan_phase_binds_no_tools(self) -> None:
+        # Plan must produce a textual plan + PLAN COMPLETE before acting: with
+        # tools bound the model skips planning, so plan binds none.
+        tools = [make_mock_tool("read"), make_mock_tool("write"), make_mock_tool("bash")]
+        captured = self._call_wrap(make_pev_state(phase="plan"), tools=tools)
+        assert captured is not None
+        assert captured.tools == []
+        # the plan instruction is still injected alongside
+        assert "PLAN COMPLETE" in self._system_text(captured)
+
+    def test_execute_phase_rebinds_tools_after_plan(self) -> None:
+        tools = [make_mock_tool("read"), make_mock_tool("write"), make_mock_tool("bash")]
+        plan_captured = self._call_wrap(make_pev_state(phase="plan"), tools=tools)
+        execute_captured = self._call_wrap(make_pev_state(phase="execute"), tools=tools)
+        assert plan_captured is not None and execute_captured is not None
+        assert plan_captured.tools == []
+        assert {t.name for t in execute_captured.tools} == {"read", "write", "bash"}
+
     def test_verify_with_no_tools_passthrough(self) -> None:
         captured = self._call_wrap(make_pev_state(phase="verify"))
         assert captured is not None
