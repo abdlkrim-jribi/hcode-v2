@@ -343,3 +343,56 @@ def test_explore_runs_built_prompt_through_run_path(monkeypatch) -> None:
     result = runner.invoke(cli, ["explore", "how does login work?"])
     assert result.exit_code == 0
     assert captured["task"] == cli_main._build_explore_task("how does login work?")
+
+
+# --- banner / welcome / status line ---------------------------------------
+#
+# Presentation-only helpers. Rendered to recorded text (no live terminal, no
+# network) and asserted on the plain output.
+
+
+def test_render_banner_contains_hcode() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_banner
+
+    console = Console(record=True, width=100)
+    console.print(render_banner())
+    assert "HCODE" in console.export_text()
+
+
+def test_render_welcome_renders_tips() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_welcome
+
+    console = Console(record=True, width=100)
+    console.print(render_welcome())
+    out = console.export_text()
+    assert "/exit" in out
+
+
+def test_bare_hcode_shows_banner_and_help() -> None:
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0
+    assert "HCODE" in result.output
+    # ...followed by the normal command help.
+    assert "Commands" in result.output
+
+
+def test_status_line_includes_model(monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_MODEL_NAME", "status-test-model")
+    from rich.console import Console
+
+    from hcode_v2.cli.statusline import render_status
+
+    console = Console(record=True, width=120)
+    console.print(render_status(mode="PEV"))
+    assert "status-test-model" in console.export_text()
+
+
+def test_version_is_exactly_the_one_liner() -> None:
+    # The banner wiring must not leak into `version`: it stays the plain string.
+    result = runner.invoke(cli, ["version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == cli_main._VERSION
