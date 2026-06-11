@@ -29,6 +29,7 @@ from langchain_core.messages import HumanMessage
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.banner import render_banner, render_welcome
 from hcode_v2.cli.completion import build_chat_session
+from hcode_v2.cli.live import LiveTurnRenderer
 from hcode_v2.cli.display import HCodeDisplay
 from hcode_v2.cli.statusline import render_status
 from hcode_v2.utils.config import Config
@@ -224,17 +225,26 @@ def chat(session: str | None, workdir: str | None) -> None:
                 continue
 
             try:
-                result = await agent.ainvoke(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config={"configurable": {"thread_id": session_id}},
-                )
-                result_messages = result.get("messages", [])
-                response_text = (
-                    _extract_text(result_messages[-1].content)
-                    if result_messages
-                    else "(no response)"
-                )
-                display.show_result(response_text)
+                # C3: stream the turn so the plan and todo progress render
+                # live. Display-only — same invocation semantics as ainvoke.
+                renderer = LiveTurnRenderer(console=display.console)
+                with renderer:
+                    async for event in agent.astream_events(
+                        {"messages": [HumanMessage(content=user_input)]},
+                        # recursion_limit MUST be explicit on the astream_events
+                        # path: langchain_core stamps its default (25) into the
+                        # config, which overrides the agent's bound 9999 and
+                        # kills tasks after ~5 tool rounds. The daemon's
+                        # astream_events (server.py:198) has the same latent
+                        # issue — fixed separately.
+                        config={
+                            "configurable": {"thread_id": session_id},
+                            "recursion_limit": 1000,
+                        },
+                        version="v2",
+                    ):
+                        renderer.process_event(event)
+                display.show_result(renderer.final_text or "(no response)")
             except Exception as exc:  # noqa: BLE001
                 display.show_error(str(exc))
 
