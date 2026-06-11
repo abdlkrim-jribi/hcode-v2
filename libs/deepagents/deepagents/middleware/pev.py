@@ -188,7 +188,7 @@ class PEVMiddleware(AgentMiddleware):
         """
         messages = state.get("messages", [])
         task = ""
-        for msg in messages:
+        for msg in reversed(messages):
             if getattr(msg, "type", None) == "human":
                 raw = msg.content
                 task = raw if isinstance(raw, str) else str(raw)

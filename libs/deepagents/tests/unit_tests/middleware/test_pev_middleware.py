@@ -178,6 +178,20 @@ class TestPEVMiddlewarePhaseInit:
         assert result is not None
         assert result["_pev_phase"] == "fast"
 
+    def test_classifies_latest_human_message_in_multi_turn_thread(self) -> None:
+        # A chat thread accumulates checkpointed history: turn 1 was trivial
+        # small talk, the CURRENT turn is a complex task. Classification must
+        # follow the latest human message, not stick to the first-of-thread.
+        state: dict[str, Any] = {"messages": [
+            HumanMessage(content="hi"),
+            AIMessage(content="Hello! How can I help?"),
+            HumanMessage(content="create calc.py with add(a,b) and a test for it"),
+        ]}
+        result = self.middleware.before_agent(state, self.runtime)
+        assert result is not None
+        assert result["_pev_phase"] == "plan"
+        assert result["_pev_task"].startswith("create calc.py")
+
     async def test_abefore_agent_delegates_to_sync(self) -> None:
         state: dict[str, Any] = {"messages": [HumanMessage(content="implement a feature")]}
         result = await self.middleware.abefore_agent(state, self.runtime)
