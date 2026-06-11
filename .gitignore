@@ -241,3 +241,4 @@ node_modules/
 desktop-app/src-ui/dist/
 desktop-app/src-ui/node_modules/
 .hcode/sessions/
+.hcode/chat_history.txt
