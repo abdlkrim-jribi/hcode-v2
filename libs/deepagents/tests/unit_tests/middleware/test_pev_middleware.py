@@ -419,14 +419,17 @@ class TestPEVMiddlewareTransitions:
         )
         assert self._after_model(state) is None
 
-    def test_no_marker_does_not_jump(self) -> None:
+    def test_markerless_plan_without_tools_retries_model(self) -> None:
+        # A markerless, tool-less plan response used to fall through with no
+        # jump_to, silently ending the run (PR-PEV-2, item 1). It must retry
+        # the model instead; the per-phase iteration cap bounds the retries.
         state = make_pev_state(
             messages=[AIMessage(content="I am still working on the plan...")],
             phase="plan",
         )
         result = self._after_model(state)
         assert result is not None
-        assert "jump_to" not in result
+        assert result["jump_to"] == "model"
         assert result["_pev_iteration"] == 1
 
     def test_iteration_counter_incremented(self) -> None:

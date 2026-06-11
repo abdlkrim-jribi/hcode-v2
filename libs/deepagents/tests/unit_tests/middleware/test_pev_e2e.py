@@ -162,6 +162,42 @@ def _long_execute_script(rounds: int = 8) -> list[AIMessage]:
     return script
 
 
+def _forgotten_marker_script() -> list[AIMessage]:
+    """Plan phase where the first response is prose WITHOUT the marker.
+
+    The model "forgot" PLAN COMPLETE (and plan binds no tools); the retry must
+    give it a second chance, where it produces the marker and the cycle runs
+    normally.
+    """
+    return [
+        AIMessage(content="Let me think about how to structure calc.py first."),
+        AIMessage(content="1. Create calc.py.\n2. Create test_calc.py.\nPLAN COMPLETE"),
+        AIMessage(
+            content="Creating calc.py.",
+            tool_calls=[{
+                "name": "write",
+                "args": {"path": "calc.py", "content": "def add(a, b):\n    return a + b\n"},
+                "id": "call-1",
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="File is in place.\nEXECUTION COMPLETE"),
+        AIMessage(content="Everything checks out.\nVERIFIED OK"),
+    ]
+
+
+def _never_marker_script(turns: int = 6) -> list[AIMessage]:
+    """A model that NEVER finishes the plan: distinct markerless prose forever.
+
+    Distinct content per turn keeps the loop detector quiet — the run must end
+    via the plan-phase iteration cap, not hang or recurse forever.
+    """
+    return [
+        AIMessage(content=f"Still thinking about the plan, attempt {idx}.")
+        for idx in range(1, turns + 1)
+    ]
+
+
 def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -320,3 +356,30 @@ class TestPEVLongExecuteE2E:
         # All eight execute tool calls actually ran.
         tool_messages = [m for m in result["messages"] if getattr(m, "type", "") == "tool"]
         assert len(tool_messages) == 8
+
+
+class TestPEVPlanRetryE2E:
+    async def test_markerless_plan_response_is_retried(self) -> None:
+        # Regression (PR-PEV-2, item 1): a plan-phase response with no
+        # PLAN COMPLETE and no tool calls used to fall through with no jump_to,
+        # so the graph ended the run silently after one model call. The plan
+        # phase must retry instead, and complete once the marker arrives.
+        script = _forgotten_marker_script()
+        result, records = await _run_happy_path(script=script, thread_id="pev-e2e-plan-retry")
+
+        assert len(records) == len(script)
+        ai_messages = [m for m in result["messages"] if getattr(m, "type", "") == "ai"]
+        assert "VERIFIED OK" in _text(ai_messages[-1].content)
+
+    async def test_never_marker_plan_ends_via_iteration_cap(self) -> None:
+        # The retry must be bounded by the EXISTING plan iteration cap (5):
+        # a model that never emits the marker gets exactly _MAX_ITERATIONS + 1
+        # calls (the breaker fires when new_iteration exceeds the cap), then
+        # the run ends — no infinite retry, no recursion blow-up.
+        result, records = await _run_happy_path(
+            script=_never_marker_script(turns=6), thread_id="pev-e2e-plan-cap"
+        )
+
+        assert len(records) == 6
+        ai_messages = [m for m in result["messages"] if getattr(m, "type", "") == "ai"]
+        assert "VERIFIED OK" not in _text(ai_messages[-1].content)

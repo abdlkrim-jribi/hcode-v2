@@ -338,8 +338,10 @@ class PEVMiddleware(AgentMiddleware):
         recent_hashes: list[str] = list(state.get("_pev_recent_hashes", []))
 
         last_content = ""
+        last_ai_message = None
         for msg in reversed(state.get("messages", [])):
             if getattr(msg, "type", None) == "ai":
+                last_ai_message = msg
                 raw = msg.content
                 last_content = raw if isinstance(raw, str) else str(raw)
                 break
@@ -373,6 +375,11 @@ class PEVMiddleware(AgentMiddleware):
             update["_pev_phase"] = "execute"
             update["_pev_iteration"] = 0
             update["_pev_plan"] = last_content
+            update["jump_to"] = "model"
+        elif phase == "plan" and not getattr(last_ai_message, "tool_calls", None):
+            # No marker and no tool calls: the model->tools edge would end the
+            # run silently. Retry the plan; the per-phase iteration cap above
+            # bounds the retries.
             update["jump_to"] = "model"
         elif phase == "execute" and "EXECUTION COMPLETE" in upper:
             update["_pev_phase"] = "verify"
