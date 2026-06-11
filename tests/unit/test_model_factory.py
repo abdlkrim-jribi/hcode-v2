@@ -95,7 +95,10 @@ def test_openai_wins_when_both_keys_present(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_max_tokens_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HCODE_MODEL_API_KEY", "key-new")
-    assert factory._build_model().kwargs["max_tokens"] == 2000
+    # 8000 default: reasoning models (gpt-oss) burn this budget on reasoning
+    # tokens before visible text; 2000 produced empty plan-phase responses
+    # once the skills section grew the system prompt.
+    assert factory._build_model().kwargs["max_tokens"] == 8000
 
     monkeypatch.setenv("HCODE_MAX_TOKENS", "512")
     assert factory._build_model().kwargs["max_tokens"] == 512
