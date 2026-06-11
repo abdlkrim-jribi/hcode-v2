@@ -74,6 +74,9 @@ _PHASE_PROMPTS: dict[str, str] = {
 _VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read", "ls", "glob", "grep"})
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
+"""Per-phase model-call cap for the plan and verify phases."""
+_MAX_EXECUTE_ITERATIONS: int = 15
+"""Per-phase model-call cap for execute, which carries the multi-step tool work."""
 _HASH_WINDOW: int = 5
 _LOOP_THRESHOLD: int = 3
 
@@ -113,7 +116,7 @@ class PEVState(AgentState):
     """Current PEV phase: ``"trivial"``, ``"fast"``, ``"plan"``, ``"execute"``, or ``"verify"``."""
 
     _pev_iteration: Annotated[NotRequired[int], PrivateStateAttr]
-    """Number of model calls made in the current session."""
+    """Number of model calls made in the current phase (reset on phase transitions)."""
 
     _pev_error_count: Annotated[NotRequired[int], PrivateStateAttr]
     """Number of ``ISSUES FOUND`` signals received (circuit-breaker counter)."""
@@ -154,10 +157,11 @@ class PEVMiddleware(AgentMiddleware):
 
     Simpler tasks use ``fast`` (single-shot) or ``trivial`` (pass-through) mode.
 
-    Circuit breaker terminates when error count ≥ ``_MAX_ERRORS`` or iteration
-    count > ``_MAX_ITERATIONS``.  Loop detection terminates when the same
-    response hash appears ≥ ``_LOOP_THRESHOLD`` times in the last ``_HASH_WINDOW``
-    turns.
+    Circuit breaker terminates when error count ≥ ``_MAX_ERRORS`` or the
+    per-phase iteration count exceeds its cap (``_MAX_ITERATIONS`` for
+    plan/verify, ``_MAX_EXECUTE_ITERATIONS`` for execute; the count resets on
+    each phase transition).  Loop detection terminates when the same response
+    hash appears ≥ ``_LOOP_THRESHOLD`` times in the last ``_HASH_WINDOW`` turns.
     """
 
     state_schema = PEVState
@@ -350,7 +354,8 @@ class PEVMiddleware(AgentMiddleware):
             loop_detected = recent_hashes.count(content_hash) >= _LOOP_THRESHOLD
 
         new_iteration = iteration + 1
-        if loop_detected or error_count >= _MAX_ERRORS or new_iteration > _MAX_ITERATIONS:
+        max_iterations = _MAX_EXECUTE_ITERATIONS if phase == "execute" else _MAX_ITERATIONS
+        if loop_detected or error_count >= _MAX_ERRORS or new_iteration > max_iterations:
             return {
                 "_pev_iteration": new_iteration,
                 "_pev_recent_hashes": recent_hashes,
@@ -363,18 +368,22 @@ class PEVMiddleware(AgentMiddleware):
             "_pev_recent_hashes": recent_hashes,
         }
 
+        # The iteration cap is per phase: each transition starts a fresh count.
         if phase == "plan" and "PLAN COMPLETE" in upper:
             update["_pev_phase"] = "execute"
+            update["_pev_iteration"] = 0
             update["_pev_plan"] = last_content
             update["jump_to"] = "model"
         elif phase == "execute" and "EXECUTION COMPLETE" in upper:
             update["_pev_phase"] = "verify"
+            update["_pev_iteration"] = 0
             update["jump_to"] = "model"
         elif phase == "verify":
             if "VERIFIED OK" in upper:
                 update["jump_to"] = "end"
             elif "ISSUES FOUND" in upper:
                 update["_pev_phase"] = "execute"
+                update["_pev_iteration"] = 0
                 update["_pev_error_count"] = error_count + 1
                 update["jump_to"] = "model"
 

@@ -135,6 +135,33 @@ def _empty_tool_turns_script() -> list[AIMessage]:
     ]
 
 
+def _long_execute_script(rounds: int = 8) -> list[AIMessage]:
+    """A realistic multi-step task: plan, then ``rounds`` execute tool turns.
+
+    Total model calls = rounds + 3, well past the old total-of-5 cap. Each
+    turn carries distinct prose so only the iteration guard is exercised,
+    not the loop detector.
+    """
+    script = [
+        AIMessage(content="1. Create the files.\n2. Wire them together.\nPLAN COMPLETE"),
+    ]
+    for idx in range(1, rounds + 1):
+        script.append(
+            AIMessage(
+                content=f"Step {idx}: writing file {idx}.",
+                tool_calls=[{
+                    "name": "write",
+                    "args": {"path": f"file_{idx}.py", "content": f"# step {idx}\n"},
+                    "id": f"call-{idx}",
+                    "type": "tool_call",
+                }],
+            )
+        )
+    script.append(AIMessage(content="All steps are done.\nEXECUTION COMPLETE"))
+    script.append(AIMessage(content="Everything checks out.\nVERIFIED OK"))
+    return script
+
+
 def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -275,3 +302,21 @@ class TestPEVEmptyContentToolTurnsE2E:
         # All three tool calls actually ran.
         tool_messages = [m for m in result["messages"] if getattr(m, "type", "") == "tool"]
         assert len(tool_messages) == 3
+
+
+class TestPEVLongExecuteE2E:
+    async def test_multi_step_execute_phase_is_not_truncated(self) -> None:
+        # Regression (PR-PEV-2, item 2a): _pev_iteration counted TOTAL model
+        # calls across all phases against _MAX_ITERATIONS = 5, so a real
+        # multi-step execute phase (8 tool rounds here, 11 model calls total)
+        # was silently cut off mid-execute. The cap must apply per phase.
+        script = _long_execute_script(rounds=8)
+        result, records = await _run_happy_path(script=script, thread_id="pev-e2e-long-execute")
+
+        # Every scripted call was consumed — the run reached the verify verdict.
+        assert len(records) == len(script)
+        ai_messages = [m for m in result["messages"] if getattr(m, "type", "") == "ai"]
+        assert "VERIFIED OK" in _text(ai_messages[-1].content)
+        # All eight execute tool calls actually ran.
+        tool_messages = [m for m in result["messages"] if getattr(m, "type", "") == "tool"]
+        assert len(tool_messages) == 8
