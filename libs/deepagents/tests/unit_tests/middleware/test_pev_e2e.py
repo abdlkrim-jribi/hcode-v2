@@ -104,6 +104,37 @@ def _happy_path_script() -> list[AIMessage]:
     ]
 
 
+def _empty_tool_turns_script() -> list[AIMessage]:
+    """Execute phase done entirely via tool-call-only turns with EMPTY content.
+
+    Realistic for tool-heavy models: no prose between tool calls. The three
+    identical empty contents must NOT register as a loop.
+    """
+
+    def _write(idx: int, path: str) -> AIMessage:
+        return AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "write",
+                "args": {"path": path, "content": f"# file {idx}\n"},
+                "id": f"call-{idx}",
+                "type": "tool_call",
+            }],
+        )
+
+    return [
+        AIMessage(
+            content="1. Create calc.py.\n2. Create test_calc.py.\n"
+            "3. Create README.md.\nPLAN COMPLETE"
+        ),
+        _write(1, "calc.py"),
+        _write(2, "test_calc.py"),
+        _write(3, "README.md"),
+        AIMessage(content="All three files are in place.\nEXECUTION COMPLETE"),
+        AIMessage(content="All planned steps completed correctly.\nVERIFIED OK"),
+    ]
+
+
 def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -144,9 +175,12 @@ class ScriptedModel(BaseChatModel):
 # ── Harness ───────────────────────────────────────────────────────────────────
 
 
-async def _run_happy_path() -> tuple[dict, list[dict]]:
-    """Run the scripted cycle through the real agent; return (result, records)."""
-    model = ScriptedModel()
+async def _run_happy_path(
+    script: list[AIMessage] | None = None,
+    thread_id: str = "pev-e2e-happy",
+) -> tuple[dict, list[dict]]:
+    """Run a scripted cycle through the real agent; return (result, records)."""
+    model = ScriptedModel(script=script) if script is not None else ScriptedModel()
     agent = create_deep_agent(
         model=model,
         tools=[write, read, ls, glob, grep],
@@ -162,7 +196,7 @@ async def _run_happy_path() -> tuple[dict, list[dict]]:
     )
     result = await agent.ainvoke(
         {"messages": [HumanMessage(content=TASK)]},
-        config={"configurable": {"thread_id": "pev-e2e-happy"}},
+        config={"configurable": {"thread_id": thread_id}},
     )
     return result, model.records
 
@@ -223,3 +257,21 @@ class TestPEVHappyPathE2E:
 
         # (5) verify: only the read-only set survives the PEV filter
         assert set(records[4]["tools"] or []) == VERIFY_READONLY_NAMES
+
+
+class TestPEVEmptyContentToolTurnsE2E:
+    async def test_consecutive_empty_tool_turns_do_not_trip_loop_detector(self) -> None:
+        # Regression (PR-PEV-2, item 2b): three consecutive tool-call-only AI
+        # messages with empty content hash identically; the loop detector must
+        # not count them as a repeated-response loop and kill the run.
+        result, records = await _run_happy_path(
+            script=_empty_tool_turns_script(), thread_id="pev-e2e-empty-tools"
+        )
+
+        # All six scripted calls consumed — no premature "loop detected" end.
+        assert len(records) == 6
+        ai_messages = [m for m in result["messages"] if getattr(m, "type", "") == "ai"]
+        assert "VERIFIED OK" in _text(ai_messages[-1].content)
+        # All three tool calls actually ran.
+        tool_messages = [m for m in result["messages"] if getattr(m, "type", "") == "tool"]
+        assert len(tool_messages) == 3

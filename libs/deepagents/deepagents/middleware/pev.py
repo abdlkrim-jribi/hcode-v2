@@ -340,9 +340,14 @@ class PEVMiddleware(AgentMiddleware):
                 last_content = raw if isinstance(raw, str) else str(raw)
                 break
 
-        content_hash = hashlib.sha256(last_content.encode()).hexdigest()
-        recent_hashes = (recent_hashes + [content_hash])[-_HASH_WINDOW:]
-        loop_detected = recent_hashes.count(content_hash) >= _LOOP_THRESHOLD
+        # Tool-call-only turns have empty content; hashing them would make any
+        # three consecutive tool rounds look like a loop. Only prose feeds the
+        # detector.
+        loop_detected = False
+        if last_content.strip():
+            content_hash = hashlib.sha256(last_content.encode()).hexdigest()
+            recent_hashes = (recent_hashes + [content_hash])[-_HASH_WINDOW:]
+            loop_detected = recent_hashes.count(content_hash) >= _LOOP_THRESHOLD
 
         new_iteration = iteration + 1
         if loop_detected or error_count >= _MAX_ERRORS or new_iteration > _MAX_ITERATIONS:
