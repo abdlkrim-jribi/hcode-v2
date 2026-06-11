@@ -530,10 +530,12 @@ class _FakeAgent:
 
     def __init__(self, events: list[dict] | None = None) -> None:
         self.calls: list[dict] = []
+        self.configs: list[dict | None] = []
         self._events = events or []
 
     async def astream_events(self, payload: dict, config: dict | None = None, version: str = "v2"):
         self.calls.append(payload)
+        self.configs.append(config)
         for event in self._events:
             yield event
 
@@ -586,6 +588,21 @@ def test_chat_plain_message_goes_to_agent(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert len(agent.calls) == 1
     assert agent.calls[0]["messages"][0].content == "hello there"
+
+
+def test_chat_stream_config_sets_explicit_recursion_limit(tmp_path: Path, monkeypatch) -> None:
+    # The astream_events path silently drops the agent's bound recursion_limit
+    # (langchain_core stamps its default 25 into the config), so chat must pass
+    # one explicitly or long tasks die at 25 supersteps.
+    monkeypatch.chdir(tmp_path)
+    result, agent = _run_chat_with_inputs(monkeypatch, ["do something", "/exit"])
+    assert result.exit_code == 0, result.output
+    assert len(agent.configs) == 1
+    config = agent.configs[0]
+    assert config is not None
+    assert config.get("recursion_limit", 25) > 25
+    # thread_id wiring is unchanged
+    assert "thread_id" in config["configurable"]
 
 
 def test_chat_shows_final_text_from_stream(tmp_path: Path, monkeypatch) -> None:

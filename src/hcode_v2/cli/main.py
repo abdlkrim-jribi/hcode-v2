@@ -231,7 +231,16 @@ def chat(session: str | None, workdir: str | None) -> None:
                 with renderer:
                     async for event in agent.astream_events(
                         {"messages": [HumanMessage(content=user_input)]},
-                        config={"configurable": {"thread_id": session_id}},
+                        # recursion_limit MUST be explicit on the astream_events
+                        # path: langchain_core stamps its default (25) into the
+                        # config, which overrides the agent's bound 9999 and
+                        # kills tasks after ~5 tool rounds. The daemon's
+                        # astream_events (server.py:198) has the same latent
+                        # issue — fixed separately.
+                        config={
+                            "configurable": {"thread_id": session_id},
+                            "recursion_limit": 1000,
+                        },
                         version="v2",
                     ):
                         renderer.process_event(event)
