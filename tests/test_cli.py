@@ -718,6 +718,58 @@ def test_live_captures_final_text() -> None:
     assert renderer.final_text == "All done."
 
 
+def _model_end(text: str) -> dict:
+    return {
+        "event": "on_chat_model_end",
+        "data": {"output": SimpleNamespace(content=text)},
+    }
+
+
+def test_live_final_answer_prefers_execute_text_over_verify_verdict() -> None:
+    # PEV turn: the LAST model output is the verify verdict (often echoing the
+    # plan). The user-facing answer must be the execute-phase result, with the
+    # verdict surfaced as a short status note instead.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_token_event("1. create calc.py 2. test it\nPLAN COMPLETE"))
+        renderer.process_event(_model_end("1. create calc.py 2. test it\nPLAN COMPLETE"))
+        renderer.process_event(_model_end(
+            "Created calc.py and test_calc.py; the test passes.\nEXECUTION COMPLETE"
+        ))
+        renderer.process_event(_model_end(
+            "1. create calc.py 2. test it — all steps done.\nVERIFIED OK"
+        ))
+    assert "Created calc.py" in renderer.final_text
+    assert "VERIFIED OK" not in renderer.final_text
+    assert "EXECUTION COMPLETE" not in renderer.final_text
+    assert renderer.verify_status == "verified"
+    # the verdict shows up as a short status note in the scrollback
+    assert "verified" in console.export_text().lower()
+
+
+def test_live_verdict_only_run_falls_back_to_stripped_verdict() -> None:
+    # No execute-phase text at all (e.g. tool-only execute turns): fall back to
+    # the verdict text, but without the raw marker.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_model_end("Everything matches the plan.\nVERIFIED OK"))
+    assert renderer.final_text == "Everything matches the plan."
+    assert renderer.verify_status == "verified"
+
+
+def test_live_issues_found_sets_status_not_answer() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_model_end("Fixing the export now.\nDone."))
+        renderer.process_event(_model_end("ISSUES FOUND: test still failing"))
+    assert renderer.verify_status == "issues found"
+    assert "ISSUES FOUND" not in renderer.final_text
+    assert "Fixing the export" in renderer.final_text
+
+
 def test_live_full_synthetic_turn() -> None:
     # plan + todo_write + tool + done, end to end through the context manager.
     console = RichConsole(record=True, width=100)

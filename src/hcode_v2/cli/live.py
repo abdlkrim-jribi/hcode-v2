@@ -14,7 +14,11 @@ on_tool_start         ``todo_write`` / ``write_todos``: replace the live
                       progress checklist from the tool input. Other tools:
                       show a lightweight "running <tool>" line.
 on_tool_end           Clear the running-tool line.
-on_chat_model_end     Remember the last AI message text as the final answer.
+on_chat_model_end     Collect answer candidates. The user-facing answer is
+                      the last real (execute-phase / plain chat) text; a
+                      verify verdict (VERIFIED OK / ISSUES FOUND) becomes a
+                      short status note, and a plan echo is never the answer
+                      unless nothing else exists.
 
 Trivial/fast turns (no plan marker, no todos) render nothing extra, and a
 malformed or unknown event never raises — rendering must not break the turn.
@@ -23,6 +27,7 @@ malformed or unknown event never raises — rendering must not break the turn.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from rich.console import Console, Group, RenderableType
@@ -41,6 +46,17 @@ _TODO_TOOLS: frozenset[str] = frozenset({"todo_write", "write_todos"})
 # PEV phase markers, matching PEVMiddleware's own text-based detection.
 _PLAN_MARKER = "PLAN COMPLETE"
 _EXEC_MARKER = "EXECUTION COMPLETE"
+_VERDICT_OK = "VERIFIED OK"
+_VERDICT_ISSUES = "ISSUES FOUND"
+_ALL_MARKERS = (_PLAN_MARKER, _EXEC_MARKER, _VERDICT_OK, _VERDICT_ISSUES)
+
+
+def _strip_markers(text: str) -> str:
+    """Remove PEV protocol markers from user-facing text, tidying blank lines."""
+    for marker in _ALL_MARKERS:
+        text = re.sub(re.escape(marker), "", text, flags=re.IGNORECASE)
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line.strip()).strip()
 
 # checklist marker + style per normalized status (ASCII-safe for Windows consoles)
 _STATUS_STYLES: dict[str, tuple[str, str]] = {
@@ -95,8 +111,9 @@ class LiveTurnRenderer:
     """Live plan + progress display for one chat turn.
 
     Use as a context manager around the ``astream_events`` loop and feed every
-    raw event to :meth:`process_event`. After the stream ends, the last AI
-    message text is available as :attr:`final_text`.
+    raw event to :meth:`process_event`. After the stream ends, the user-facing
+    answer is available as :attr:`final_text` and the verify outcome (if any)
+    as :attr:`verify_status`.
 
     One instance per turn; do not reuse.
 
@@ -106,13 +123,21 @@ class LiveTurnRenderer:
 
     def __init__(self, console: Console) -> None:
         self.console = console
-        self.final_text: str = ""
+        self.verify_status: str | None = None
+        self._answer_text: str = ""
+        self._verdict_text: str = ""
+        self._plan_echo_text: str = ""
         self._token_buffer: str = ""
         self._plan_shown: bool = False
         self._exec_done: bool = False
         self._todos: list[tuple[str, str]] = []
         self._active_tool: str | None = None
         self._live: Live | None = None
+
+    @property
+    def final_text(self) -> str:
+        """User-facing answer: real text first, then stripped verdict, then plan."""
+        return self._answer_text or self._verdict_text or self._plan_echo_text
 
     # ── Context manager (Live lifecycle) ────────────────────────────────────
 
@@ -207,10 +232,31 @@ class LiveTurnRenderer:
         self._refresh()
 
     def _on_model_end(self, data: dict) -> None:
+        """Classify each model output by its content markers.
+
+        The verify verdict is the LAST output of a PEV turn and often echoes
+        the plan — it must become a status note, not the displayed answer.
+        Classification is by content (not by phase flags) because the marker
+        streams in tokens before the same call's ``on_chat_model_end``.
+        """
         output = data.get("output")
-        text = _text_from_content(getattr(output, "content", ""))
-        if text:
-            self.final_text = text
+        text = _text_from_content(getattr(output, "content", "")).strip()
+        if not text:
+            return
+        upper = text.upper()
+
+        if _VERDICT_OK in upper or _VERDICT_ISSUES in upper:
+            status = "verified" if _VERDICT_OK in upper else "issues found"
+            if self.verify_status != status:
+                self.verify_status = status
+                style = "green" if status == "verified" else "yellow"
+                self.console.print(Text(status, style=f"dim {style}"))
+            self._verdict_text = _strip_markers(text)
+        elif _PLAN_MARKER in upper:
+            # Plan echo — already rendered in the Plan panel above.
+            self._plan_echo_text = _strip_markers(text)
+        else:
+            self._answer_text = _strip_markers(text)
 
 
 __all__ = ["LiveTurnRenderer"]
