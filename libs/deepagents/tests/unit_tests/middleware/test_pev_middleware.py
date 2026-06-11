@@ -243,6 +243,24 @@ class TestPEVMiddlewarePromptInjection:
         assert "VERIFIED OK" in text
         assert "ISSUES FOUND" in text
 
+    def test_verify_prompt_names_readonly_tools_and_forbids_execute(self) -> None:
+        # Probe-proven failure: in verify the model kept calling the unbound
+        # `execute` tool until the per-phase breaker ended the run, so VERIFIED
+        # OK was never emitted. The prompt must name exactly what IS available
+        # and explicitly rule out everything else.
+        captured = self._call_wrap(make_pev_state(phase="verify"))
+        assert captured is not None
+        text = self._system_text(captured)
+        # names the available read-only tools (must match _VERIFY_READONLY_TOOLS)
+        assert "read, ls, glob, grep" in text
+        # explicitly calls out execute (and other tools) as unavailable
+        assert "execute" in text
+        assert "Do NOT" in text
+        # demands the verdict line
+        assert "MUST end" in text
+        assert "VERIFIED OK" in text
+        assert "ISSUES FOUND" in text
+
     def test_trivial_phase_no_prompt_injected(self) -> None:
         captured = self._call_wrap(make_pev_state(phase="trivial"))
         assert captured is not None

@@ -47,17 +47,20 @@ Use available tools to accomplish each step.
 When all steps are complete and results are correct, output this marker alone on its own line:
 EXECUTION COMPLETE"""
 
+# Tool names listed here must match _VERIFY_READONLY_TOOLS below.
 _VERIFY_PROMPT: str = """\
 ## PEV Verification Phase
 
-Inspect the execution results.  Do not modify any files during this phase.
-Confirm that every planned step completed, outputs are correct, and no errors remain.
+You are in the VERIFICATION phase. Only these read-only tools are available: \
+read, ls, glob, grep. Do NOT attempt execute or any other tool — they are not \
+available in this phase and will fail.
 
-If everything is correct, output this marker alone on its own line:
+Base your verdict on READING the created/modified files and checking them \
+against the plan. Do not modify anything.
+
+You MUST end your response with exactly one of these lines, alone on its own line:
 VERIFIED OK
-
-If problems require re-execution, output:
-ISSUES FOUND: <brief description>"""
+ISSUES FOUND: <what is wrong>"""
 
 _FAST_PROMPT: str = """\
 ## PEV Fast Mode
