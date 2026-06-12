@@ -52,8 +52,8 @@ _VERIFY_PROMPT: str = """\
 ## PEV Verification Phase
 
 You are in the VERIFICATION phase. Only these read-only tools are available: \
-read, ls, glob, grep. Do NOT attempt execute or any other tool — they are not \
-available in this phase and will fail.
+read_file, read, ls, glob, grep. Do NOT attempt execute or any other tool — \
+they are not available in this phase and will fail.
 
 Base your verdict on READING the created/modified files and checking them \
 against the plan. Do not modify anything.
@@ -74,7 +74,9 @@ _PHASE_PROMPTS: dict[str, str] = {
     "fast": _FAST_PROMPT,
 }
 
-_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read", "ls", "glob", "grep"})
+# read_file is the deepagents filesystem-middleware reader; read is the hcode
+# registry reader. Both stacks can be present, so verify whitelists both.
+_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "read", "ls", "glob", "grep"})
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
 """Per-phase model-call cap for the plan and verify phases."""

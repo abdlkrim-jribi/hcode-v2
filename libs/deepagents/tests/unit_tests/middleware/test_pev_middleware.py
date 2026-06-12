@@ -252,7 +252,7 @@ class TestPEVMiddlewarePromptInjection:
         assert captured is not None
         text = self._system_text(captured)
         # names the available read-only tools (must match _VERIFY_READONLY_TOOLS)
-        assert "read, ls, glob, grep" in text
+        assert "read_file, read, ls, glob, grep" in text
         # explicitly calls out execute (and other tools) as unavailable
         assert "execute" in text
         assert "Do NOT" in text
@@ -267,9 +267,15 @@ class TestPEVMiddlewarePromptInjection:
         assert captured.system_message is None
 
     def test_verify_keeps_only_readonly_tools(self) -> None:
+        # read_file is the deepagents filesystem-middleware reader; read is the
+        # hcode registry reader. Verify must keep BOTH (probe-proven: the model
+        # called read_file, which wasn't whitelisted, and wasted verify turns).
         tools = [
             make_mock_tool("read"),
+            make_mock_tool("read_file"),
             make_mock_tool("write"),
+            make_mock_tool("write_file"),
+            make_mock_tool("execute"),
             make_mock_tool("ls"),
             make_mock_tool("bash"),
             make_mock_tool("grep"),
@@ -277,7 +283,7 @@ class TestPEVMiddlewarePromptInjection:
         captured = self._call_wrap(make_pev_state(phase="verify"), tools=tools)
         assert captured is not None
         remaining = {t.name for t in captured.tools}
-        assert remaining == {"read", "ls", "grep"}
+        assert remaining == {"read", "read_file", "ls", "grep"}
 
     def test_non_verify_phase_does_not_filter_tools(self) -> None:
         tools = [make_mock_tool("read"), make_mock_tool("write"), make_mock_tool("bash")]
