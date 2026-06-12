@@ -390,6 +390,11 @@ class PEVMiddleware(AgentMiddleware):
             update["_pev_phase"] = "verify"
             update["_pev_iteration"] = 0
             update["jump_to"] = "model"
+        elif phase == "execute" and not getattr(last_ai_message, "tool_calls", None):
+            # No marker and no tool calls (e.g. an empty reasoning-only turn):
+            # the model->tools edge would end the run silently. Retry, bounded
+            # by the per-phase iteration cap above — same gap as plan.
+            update["jump_to"] = "model"
         elif phase == "verify":
             if "VERIFIED OK" in upper:
                 update["jump_to"] = "end"
@@ -397,6 +402,10 @@ class PEVMiddleware(AgentMiddleware):
                 update["_pev_phase"] = "execute"
                 update["_pev_iteration"] = 0
                 update["_pev_error_count"] = error_count + 1
+                update["jump_to"] = "model"
+            elif not getattr(last_ai_message, "tool_calls", None):
+                # No verdict and no tool calls: re-prompt for a verdict
+                # instead of ending silently; the iteration cap bounds it.
                 update["jump_to"] = "model"
 
         return update

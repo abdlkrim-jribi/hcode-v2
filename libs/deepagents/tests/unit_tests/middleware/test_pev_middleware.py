@@ -456,6 +456,67 @@ class TestPEVMiddlewareTransitions:
         assert result["jump_to"] == "model"
         assert result["_pev_iteration"] == 1
 
+    def test_markerless_execute_without_tools_retries_model(self) -> None:
+        # Same silent-death gap as the plan phase (PR-PEV-3): an execute-phase
+        # turn with no EXECUTION COMPLETE and no tool calls (e.g. an empty
+        # reasoning-only finish_reason='stop' turn) used to fall through with
+        # no jump_to and end the run silently. It must retry the model.
+        state = make_pev_state(
+            messages=[AIMessage(content="")],
+            phase="execute",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "model"
+        assert result["_pev_iteration"] == 1
+
+    def test_markerless_verify_without_tools_retries_model(self) -> None:
+        # Verify-phase variant: no VERIFIED OK / ISSUES FOUND and no tool
+        # calls must re-prompt for a verdict, not end the run silently.
+        state = make_pev_state(
+            messages=[AIMessage(content="Let me look at the files.")],
+            phase="verify",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "model"
+        assert result["_pev_iteration"] == 1
+
+    def test_markerless_retry_is_bounded_by_phase_caps(self) -> None:
+        # The new retries stay bounded by the EXISTING per-phase caps: at the
+        # cap the breaker (checked before any retry) ends the run.
+        execute_at_cap = make_pev_state(
+            messages=[AIMessage(content="")],
+            phase="execute",
+            iteration=15,  # _MAX_EXECUTE_ITERATIONS
+        )
+        result = self._after_model(execute_at_cap)
+        assert result is not None
+        assert result["jump_to"] == "end"
+
+        verify_at_cap = make_pev_state(
+            messages=[AIMessage(content="Still looking around.")],
+            phase="verify",
+            iteration=5,  # _MAX_ITERATIONS
+        )
+        result = self._after_model(verify_at_cap)
+        assert result is not None
+        assert result["jump_to"] == "end"
+
+    def test_execute_turn_with_tool_calls_does_not_retry(self) -> None:
+        # A normal tool-call turn must keep flowing to the tools node — the
+        # retry only fires when there is neither a marker nor a tool call.
+        state = make_pev_state(
+            messages=[AIMessage(
+                content="",
+                tool_calls=[{"name": "write", "args": {"path": "f.py"}, "id": "c1", "type": "tool_call"}],
+            )],
+            phase="execute",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert "jump_to" not in result
+
     def test_iteration_counter_incremented(self) -> None:
         state = make_pev_state(
             messages=[AIMessage(content="progress")],
