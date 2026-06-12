@@ -47,17 +47,20 @@ Use available tools to accomplish each step.
 When all steps are complete and results are correct, output this marker alone on its own line:
 EXECUTION COMPLETE"""
 
+# Tool names listed here must match _VERIFY_READONLY_TOOLS below.
 _VERIFY_PROMPT: str = """\
 ## PEV Verification Phase
 
-Inspect the execution results.  Do not modify any files during this phase.
-Confirm that every planned step completed, outputs are correct, and no errors remain.
+You are in the VERIFICATION phase. Only these read-only tools are available: \
+read, ls, glob, grep. Do NOT attempt execute or any other tool — they are not \
+available in this phase and will fail.
 
-If everything is correct, output this marker alone on its own line:
+Base your verdict on READING the created/modified files and checking them \
+against the plan. Do not modify anything.
+
+You MUST end your response with exactly one of these lines, alone on its own line:
 VERIFIED OK
-
-If problems require re-execution, output:
-ISSUES FOUND: <brief description>"""
+ISSUES FOUND: <what is wrong>"""
 
 _FAST_PROMPT: str = """\
 ## PEV Fast Mode
@@ -74,6 +77,9 @@ _PHASE_PROMPTS: dict[str, str] = {
 _VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read", "ls", "glob", "grep"})
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
+"""Per-phase model-call cap for the plan and verify phases."""
+_MAX_EXECUTE_ITERATIONS: int = 15
+"""Per-phase model-call cap for execute, which carries the multi-step tool work."""
 _HASH_WINDOW: int = 5
 _LOOP_THRESHOLD: int = 3
 
@@ -113,7 +119,7 @@ class PEVState(AgentState):
     """Current PEV phase: ``"trivial"``, ``"fast"``, ``"plan"``, ``"execute"``, or ``"verify"``."""
 
     _pev_iteration: Annotated[NotRequired[int], PrivateStateAttr]
-    """Number of model calls made in the current session."""
+    """Number of model calls made in the current phase (reset on phase transitions)."""
 
     _pev_error_count: Annotated[NotRequired[int], PrivateStateAttr]
     """Number of ``ISSUES FOUND`` signals received (circuit-breaker counter)."""
@@ -154,10 +160,11 @@ class PEVMiddleware(AgentMiddleware):
 
     Simpler tasks use ``fast`` (single-shot) or ``trivial`` (pass-through) mode.
 
-    Circuit breaker terminates when error count ≥ ``_MAX_ERRORS`` or iteration
-    count > ``_MAX_ITERATIONS``.  Loop detection terminates when the same
-    response hash appears ≥ ``_LOOP_THRESHOLD`` times in the last ``_HASH_WINDOW``
-    turns.
+    Circuit breaker terminates when error count ≥ ``_MAX_ERRORS`` or the
+    per-phase iteration count exceeds its cap (``_MAX_ITERATIONS`` for
+    plan/verify, ``_MAX_EXECUTE_ITERATIONS`` for execute; the count resets on
+    each phase transition).  Loop detection terminates when the same response
+    hash appears ≥ ``_LOOP_THRESHOLD`` times in the last ``_HASH_WINDOW`` turns.
     """
 
     state_schema = PEVState
@@ -188,7 +195,7 @@ class PEVMiddleware(AgentMiddleware):
         """
         messages = state.get("messages", [])
         task = ""
-        for msg in messages:
+        for msg in reversed(messages):
             if getattr(msg, "type", None) == "human":
                 raw = msg.content
                 task = raw if isinstance(raw, str) else str(raw)
@@ -334,18 +341,26 @@ class PEVMiddleware(AgentMiddleware):
         recent_hashes: list[str] = list(state.get("_pev_recent_hashes", []))
 
         last_content = ""
+        last_ai_message = None
         for msg in reversed(state.get("messages", [])):
             if getattr(msg, "type", None) == "ai":
+                last_ai_message = msg
                 raw = msg.content
                 last_content = raw if isinstance(raw, str) else str(raw)
                 break
 
-        content_hash = hashlib.sha256(last_content.encode()).hexdigest()
-        recent_hashes = (recent_hashes + [content_hash])[-_HASH_WINDOW:]
-        loop_detected = recent_hashes.count(content_hash) >= _LOOP_THRESHOLD
+        # Tool-call-only turns have empty content; hashing them would make any
+        # three consecutive tool rounds look like a loop. Only prose feeds the
+        # detector.
+        loop_detected = False
+        if last_content.strip():
+            content_hash = hashlib.sha256(last_content.encode()).hexdigest()
+            recent_hashes = (recent_hashes + [content_hash])[-_HASH_WINDOW:]
+            loop_detected = recent_hashes.count(content_hash) >= _LOOP_THRESHOLD
 
         new_iteration = iteration + 1
-        if loop_detected or error_count >= _MAX_ERRORS or new_iteration > _MAX_ITERATIONS:
+        max_iterations = _MAX_EXECUTE_ITERATIONS if phase == "execute" else _MAX_ITERATIONS
+        if loop_detected or error_count >= _MAX_ERRORS or new_iteration > max_iterations:
             return {
                 "_pev_iteration": new_iteration,
                 "_pev_recent_hashes": recent_hashes,
@@ -358,18 +373,27 @@ class PEVMiddleware(AgentMiddleware):
             "_pev_recent_hashes": recent_hashes,
         }
 
+        # The iteration cap is per phase: each transition starts a fresh count.
         if phase == "plan" and "PLAN COMPLETE" in upper:
             update["_pev_phase"] = "execute"
+            update["_pev_iteration"] = 0
             update["_pev_plan"] = last_content
+            update["jump_to"] = "model"
+        elif phase == "plan" and not getattr(last_ai_message, "tool_calls", None):
+            # No marker and no tool calls: the model->tools edge would end the
+            # run silently. Retry the plan; the per-phase iteration cap above
+            # bounds the retries.
             update["jump_to"] = "model"
         elif phase == "execute" and "EXECUTION COMPLETE" in upper:
             update["_pev_phase"] = "verify"
+            update["_pev_iteration"] = 0
             update["jump_to"] = "model"
         elif phase == "verify":
             if "VERIFIED OK" in upper:
                 update["jump_to"] = "end"
             elif "ISSUES FOUND" in upper:
                 update["_pev_phase"] = "execute"
+                update["_pev_iteration"] = 0
                 update["_pev_error_count"] = error_count + 1
                 update["jump_to"] = "model"
 

@@ -178,6 +178,20 @@ class TestPEVMiddlewarePhaseInit:
         assert result is not None
         assert result["_pev_phase"] == "fast"
 
+    def test_classifies_latest_human_message_in_multi_turn_thread(self) -> None:
+        # A chat thread accumulates checkpointed history: turn 1 was trivial
+        # small talk, the CURRENT turn is a complex task. Classification must
+        # follow the latest human message, not stick to the first-of-thread.
+        state: dict[str, Any] = {"messages": [
+            HumanMessage(content="hi"),
+            AIMessage(content="Hello! How can I help?"),
+            HumanMessage(content="create calc.py with add(a,b) and a test for it"),
+        ]}
+        result = self.middleware.before_agent(state, self.runtime)
+        assert result is not None
+        assert result["_pev_phase"] == "plan"
+        assert result["_pev_task"].startswith("create calc.py")
+
     async def test_abefore_agent_delegates_to_sync(self) -> None:
         state: dict[str, Any] = {"messages": [HumanMessage(content="implement a feature")]}
         result = await self.middleware.abefore_agent(state, self.runtime)
@@ -226,6 +240,24 @@ class TestPEVMiddlewarePromptInjection:
         captured = self._call_wrap(make_pev_state(phase="verify"))
         assert captured is not None
         text = self._system_text(captured)
+        assert "VERIFIED OK" in text
+        assert "ISSUES FOUND" in text
+
+    def test_verify_prompt_names_readonly_tools_and_forbids_execute(self) -> None:
+        # Probe-proven failure: in verify the model kept calling the unbound
+        # `execute` tool until the per-phase breaker ended the run, so VERIFIED
+        # OK was never emitted. The prompt must name exactly what IS available
+        # and explicitly rule out everything else.
+        captured = self._call_wrap(make_pev_state(phase="verify"))
+        assert captured is not None
+        text = self._system_text(captured)
+        # names the available read-only tools (must match _VERIFY_READONLY_TOOLS)
+        assert "read, ls, glob, grep" in text
+        # explicitly calls out execute (and other tools) as unavailable
+        assert "execute" in text
+        assert "Do NOT" in text
+        # demands the verdict line
+        assert "MUST end" in text
         assert "VERIFIED OK" in text
         assert "ISSUES FOUND" in text
 
@@ -405,14 +437,17 @@ class TestPEVMiddlewareTransitions:
         )
         assert self._after_model(state) is None
 
-    def test_no_marker_does_not_jump(self) -> None:
+    def test_markerless_plan_without_tools_retries_model(self) -> None:
+        # A markerless, tool-less plan response used to fall through with no
+        # jump_to, silently ending the run (PR-PEV-2, item 1). It must retry
+        # the model instead; the per-phase iteration cap bounds the retries.
         state = make_pev_state(
             messages=[AIMessage(content="I am still working on the plan...")],
             phase="plan",
         )
         result = self._after_model(state)
         assert result is not None
-        assert "jump_to" not in result
+        assert result["jump_to"] == "model"
         assert result["_pev_iteration"] == 1
 
     def test_iteration_counter_incremented(self) -> None:

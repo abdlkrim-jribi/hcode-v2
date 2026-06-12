@@ -311,6 +311,25 @@ class TestWorkflowMiddleware:
         assert result is not None
         assert result["_workflow_active"] is True
 
+    def test_workflow_triggers_on_latest_human_message(self, tmp_path: Path) -> None:
+        # Mid-session trigger: earlier turns are ordinary chat, the CURRENT
+        # turn asks for the workflow. Detection must use the latest human
+        # message, not the first-of-thread.
+        wd = tmp_path / "workflows"
+        wd.mkdir()
+        (wd / "ship-it.md").write_text("## Steps\n1. Build\n")
+
+        mw = WorkflowMiddleware(workflows_dir=str(wd))
+        state: dict[str, Any] = {"messages": [
+            HumanMessage(content="hi"),
+            AIMessage(content="Hello! How can I help?"),
+            HumanMessage(content="run workflow ship-it"),
+        ]}
+        result = mw.before_agent(state, self.runtime)
+        assert result is not None
+        assert result["_workflow_active"] is True
+        assert result["_workflow_name"] == "ship-it"
+
     def test_missing_workflow_file_sets_inactive(self, tmp_path: Path) -> None:
         mw = WorkflowMiddleware(workflows_dir=str(tmp_path))
         state: dict[str, Any] = {"messages": [HumanMessage(content="run workflow ghost")]}
