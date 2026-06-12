@@ -256,7 +256,11 @@ class LiveTurnRenderer:
             # Plan echo — already rendered in the Plan panel above.
             self._plan_echo_text = _strip_markers(text)
         else:
-            self._answer_text = _strip_markers(text)
+            # A bare "EXECUTION COMPLETE" strips to empty — it must not wipe
+            # an earlier real answer.
+            stripped = _strip_markers(text)
+            if stripped:
+                self._answer_text = stripped
 
 
 __all__ = ["LiveTurnRenderer"]

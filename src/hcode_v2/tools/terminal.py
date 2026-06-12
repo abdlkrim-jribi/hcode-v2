@@ -70,6 +70,7 @@ def bash(
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     cwd=work_dir,
                 )
                 for line in proc.stdout:  # type: ignore[union-attr]
@@ -91,6 +92,7 @@ def bash(
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=work_dir,
         )

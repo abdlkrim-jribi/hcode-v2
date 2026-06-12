@@ -770,6 +770,17 @@ def test_live_issues_found_sets_status_not_answer() -> None:
     assert "Fixing the export" in renderer.final_text
 
 
+def test_live_marker_only_message_does_not_wipe_answer() -> None:
+    # gpt-oss often ends execute with a bare "EXECUTION COMPLETE" turn; it
+    # strips to empty and must not overwrite the earlier real answer.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_model_end("Created calc.py and its tests."))
+        renderer.process_event(_model_end("EXECUTION COMPLETE"))
+    assert renderer.final_text == "Created calc.py and its tests."
+
+
 def test_live_full_synthetic_turn() -> None:
     # plan + todo_write + tool + done, end to end through the context manager.
     console = RichConsole(record=True, width=100)

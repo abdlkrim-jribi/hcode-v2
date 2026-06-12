@@ -95,10 +95,19 @@ async def create_hcode_agent(
     # virtual_mode=True anchors the virtual `/` root to work_dir, so the model's
     # `/calculator.py` resolves to {work_dir}/calculator.py instead of the OS
     # drive root. Defaults to the current working directory.
+    # inherit_env=True gives the execute tool the parent environment (PATH
+    # included) — without it the backend runs commands with an EMPTY env, so
+    # `python` / `pytest` are never found and the execute phase dead-ends.
+    # Inheriting the full env is a conscious trade-off for a local dev CLI.
     resolved_work_dir = work_dir or os.getcwd()
+    # PYTHONIOENCODING/PYTHONUTF8 force Python children (pytest) to emit UTF-8
+    # even when stdout is a pipe — otherwise they write the Windows ANSI code
+    # page (cp1252/cp1256) and the reader's UTF-8 decode hits invalid bytes.
     backend = LocalShellBackend(
         root_dir=resolved_work_dir,
         virtual_mode=True,
+        inherit_env=True,
+        env={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
     )
 
     middleware = []
