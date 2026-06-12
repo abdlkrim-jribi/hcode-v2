@@ -100,10 +100,14 @@ async def create_hcode_agent(
     # `python` / `pytest` are never found and the execute phase dead-ends.
     # Inheriting the full env is a conscious trade-off for a local dev CLI.
     resolved_work_dir = work_dir or os.getcwd()
+    # PYTHONIOENCODING/PYTHONUTF8 force Python children (pytest) to emit UTF-8
+    # even when stdout is a pipe — otherwise they write the Windows ANSI code
+    # page (cp1252/cp1256) and the reader's UTF-8 decode hits invalid bytes.
     backend = LocalShellBackend(
         root_dir=resolved_work_dir,
         virtual_mode=True,
         inherit_env=True,
+        env={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
     )
 
     middleware = []

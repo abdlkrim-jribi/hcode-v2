@@ -311,6 +311,13 @@ class LocalShellBackend(FilesystemBackend, SandboxBackendProtocol):
                 capture_output=True,
                 stdin=subprocess.DEVNULL,  # Prevent hanging on commands that read stdin (e.g. python, cat)
                 text=True,
+                # Explicit encoding: text=True alone decodes with the locale
+                # code page on Windows, making output locale-dependent.
+                # errors="replace" guarantees a stray byte (e.g. cp1252 output
+                # from a child) degrades to U+FFFD instead of killing the
+                # subprocess reader thread with UnicodeDecodeError.
+                encoding="utf-8",
+                errors="replace",
                 timeout=effective_timeout,
                 env=self._env,
                 cwd=str(self.cwd),  # Use the root_dir from FilesystemBackend

@@ -23,6 +23,14 @@ if _OPENAI_KEY:
 if _OPENAI_URL:
     os.environ["OPENAI_BASE_URL"] = _OPENAI_URL
 
+# Force Python child processes (pytest etc.) to emit UTF-8 even when their
+# stdout is a pipe — otherwise on Windows they write the ANSI code page
+# (cp1252/cp1256) and our UTF-8 readers hit invalid bytes. Tool subprocesses
+# (terminal.py, base.py, diff.py) inherit os.environ, so one mutation here
+# covers them all. setdefault: respect an explicit user override.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 import click
 from langchain_core.messages import HumanMessage
 

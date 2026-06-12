@@ -19,6 +19,7 @@ def run_shell(cmd: str, *, cwd: Path | None = None, timeout: int = 30) -> tuple[
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         cwd=str(cwd or get_root_dir()),
     )
@@ -32,6 +33,7 @@ def run_git(args: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         timeout=30,
         cwd=str(cwd or get_root_dir()),
     )
