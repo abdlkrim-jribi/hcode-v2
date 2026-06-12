@@ -30,11 +30,24 @@ def test_destructive_tool_names_exist_in_registry() -> None:
 
 
 def test_verify_readonly_tool_names_exist_in_registry() -> None:
-    """Every name in _VERIFY_READONLY_TOOLS must match a real registered tool."""
-    tool_names = {t.name for t in get_all_tools()}
+    """Every name in _VERIFY_READONLY_TOOLS must match a real bound tool.
+
+    The runtime tool set is TWO layers, not just the hcode registry:
+    ``create_deep_agent`` always composes the deepagents builtin
+    ``FilesystemMiddleware``, whose tools (``read_file`` etc.) are bound
+    alongside ``get_all_tools()``. Probe-proven: the model uses ``read_file``
+    during execute and reaches for it in verify, so the whitelist must cover
+    both layers and this contract checks against their union.
+    """
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    registry_names = {t.name for t in get_all_tools()}
+    builtin_names = {t.name for t in FilesystemMiddleware().tools}
+    tool_names = registry_names | builtin_names
     for name in _VERIFY_READONLY_TOOLS:
         assert name in tool_names, (
-            f"_VERIFY_READONLY_TOOLS has '{name}' but no tool with that name exists in the registry."
+            f"_VERIFY_READONLY_TOOLS has '{name}' but no tool with that name exists in the "
+            f"hcode registry or the deepagents builtin FilesystemMiddleware."
         )
 
 

@@ -75,8 +75,11 @@ _PHASE_PROMPTS: dict[str, str] = {
     "fast": _FAST_PROMPT,
 }
 
-# read_file is the deepagents filesystem-middleware reader; read is the hcode
-# registry reader. Both stacks can be present, so verify whitelists both.
+# Tool names here must match a tool actually bound at runtime. TWO layers
+# contribute tools: the HCode registry (tools/registry.py — "read") and the
+# deepagents builtin FilesystemMiddleware ("read_file"), which create_deep_agent
+# always composes. Both readers must be whitelisted or verify loses one of them.
+# Guarded by tests/test_tool_name_contracts.py.
 _VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "read", "ls", "glob", "grep"})
 _PHASE_MARKERS: tuple[str, ...] = ("PLAN COMPLETE", "EXECUTION COMPLETE", "VERIFIED OK", "ISSUES FOUND")
 """Completion/verdict markers; a breaker exit without any of these gets a synthesized status."""
