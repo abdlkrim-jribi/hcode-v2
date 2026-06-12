@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
+from langchain_core.messages import AIMessage
 from typing_extensions import TypedDict
 
 from deepagents.middleware._utils import append_to_system_message
@@ -77,6 +78,8 @@ _PHASE_PROMPTS: dict[str, str] = {
 # read_file is the deepagents filesystem-middleware reader; read is the hcode
 # registry reader. Both stacks can be present, so verify whitelists both.
 _VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "read", "ls", "glob", "grep"})
+_PHASE_MARKERS: tuple[str, ...] = ("PLAN COMPLETE", "EXECUTION COMPLETE", "VERIFIED OK", "ISSUES FOUND")
+"""Completion/verdict markers; a breaker exit without any of these gets a synthesized status."""
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
 """Per-phase model-call cap for the plan and verify phases."""
@@ -363,11 +366,22 @@ class PEVMiddleware(AgentMiddleware):
         new_iteration = iteration + 1
         max_iterations = _MAX_EXECUTE_ITERATIONS if phase == "execute" else _MAX_ITERATIONS
         if loop_detected or error_count >= _MAX_ERRORS or new_iteration > max_iterations:
-            return {
+            breaker_update: dict[str, Any] = {
                 "_pev_iteration": new_iteration,
                 "_pev_recent_hashes": recent_hashes,
                 "jump_to": "end",
             }
+            # Honest status: if the final turn carries no phase marker, the UI
+            # would render nothing. Append a negative verdict naming the dead
+            # phase — never a fabricated VERIFIED OK.
+            if not any(marker in last_content.upper() for marker in _PHASE_MARKERS):
+                breaker_update["messages"] = [
+                    AIMessage(
+                        content=f"ISSUES FOUND: {phase} phase did not complete "
+                        "(stopped by iteration cap or circuit breaker)."
+                    )
+                ]
+            return breaker_update
 
         upper = last_content.upper()
         update: dict[str, Any] = {

@@ -517,6 +517,41 @@ class TestPEVMiddlewareTransitions:
         assert result is not None
         assert "jump_to" not in result
 
+    def test_cap_exit_without_marker_synthesizes_issues_found(self) -> None:
+        # Honest status (PR-PEV-3, Fix D): a cap/breaker exit on a markerless
+        # turn used to end the run with nothing for the UI to render. It must
+        # append a negative ISSUES FOUND status naming the dead phase.
+        state = make_pev_state(
+            messages=[AIMessage(content="still working")],
+            phase="execute",
+            iteration=15,  # _MAX_EXECUTE_ITERATIONS -> cap fires
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "end"
+        synthesized = result["messages"]
+        assert len(synthesized) == 1
+        text = synthesized[0].content
+        assert "ISSUES FOUND" in text
+        assert "execute" in text
+        assert "did not complete" in text
+        # never fabricate a positive verdict
+        assert "VERIFIED OK" not in text
+
+    def test_breaker_exit_with_marker_does_not_synthesize_status(self) -> None:
+        # If the final turn already carries a marker (here the model's own
+        # ISSUES FOUND as the error breaker fires), the UI has honest output —
+        # nothing is appended.
+        state = make_pev_state(
+            messages=[AIMessage(content="ISSUES FOUND: tests still failing")],
+            phase="verify",
+            error_count=3,  # _MAX_ERRORS -> breaker fires
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "end"
+        assert "messages" not in result
+
     def test_iteration_counter_incremented(self) -> None:
         state = make_pev_state(
             messages=[AIMessage(content="progress")],
