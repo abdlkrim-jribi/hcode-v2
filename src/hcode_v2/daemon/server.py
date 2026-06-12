@@ -197,7 +197,15 @@ class JsonRpcDaemon:
             last_text = ""
             async for event in agent.astream_events(
                 {"messages": [HumanMessage(content=task)]},
-                config={"configurable": {"thread_id": thread_id}},
+                # recursion_limit MUST be explicit on the astream_events path:
+                # langchain_core stamps its default (25) into the config, which
+                # overrides the agent's bound 9999 and kills tasks after ~5 tool
+                # rounds. Mirrors the CLI fix (cli/main.py:242). Matters more now
+                # that PEV's execute phase runs up to 15 rounds.
+                config={
+                    "configurable": {"thread_id": thread_id},
+                    "recursion_limit": 1000,
+                },
                 version="v2",
             ):
                 bridge.process_event(event)
