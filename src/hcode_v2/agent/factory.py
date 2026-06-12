@@ -35,7 +35,9 @@ def _build_model():
 
     ``ANTHROPIC_API_KEY`` selects ``ChatAnthropic`` when set and no
     OpenAI-compatible key is resolved.  ``HCODE_MAX_TOKENS`` caps output
-    tokens (default 2000).
+    tokens (default 8000 — reasoning models like gpt-oss spend this budget
+    on reasoning tokens before visible text; 2000 truncated plan-phase
+    responses to empty once the skills section grew the prompt).
 
     When ``HCODE_TOOLCALL_MODE`` is ``"json"`` or ``"auto"``, the model is
     wrapped with ``JsonToolCallWrapper`` so the agent degrades gracefully on
@@ -43,7 +45,7 @@ def _build_model():
     ``scripts/probe_model.py`` against the endpoint to determine the right mode.
     """
     config = Config.from_env()
-    max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "2000"))
+    max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "8000"))
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
     if anthropic_key and not config.api_key:
