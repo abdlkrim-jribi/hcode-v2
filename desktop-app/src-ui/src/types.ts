@@ -77,7 +77,6 @@ export type HcodeMessage =
     | { type: 'log';           payload: LogPayload }
     | { type: 'agent_phase';   phase: AgentPhase }
     | { type: 'ready' }
-    | { type: 'done' }
     // ── v2 C2 streaming events (emitted by bridge.py / mock daemon) ─────────
     | { type: 'streaming_chunk';     payload: { content: string; phase: string } }
     | { type: 'planning_started';    payload: { timestamp: number } }
