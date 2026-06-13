@@ -14,7 +14,6 @@
  *   listMcpServers, connectMcpServer, disconnectMcpServer
  */
 import type { HcodeMessage, FileEntry, DaemonInfo } from '../types';
-import { createMockEventStream, playMockStream, agentEventToHcodeMessage } from './mock-events';
 
 // ── Transport selection ───────────────────────────────────────────────────────
 //
@@ -152,35 +151,79 @@ const MOCK_MCP_SERVERS = [
 let _mockListeners: Array<(e: { payload: unknown }) => void> = [];
 let _mockCancel: (() => void) | null = null;
 
-function _fireMock(task: string): void {
+/**
+ * Emit a SINGLE coherent mock event stream for one task — exactly the event
+ * vocabulary bridge.py emits in live mode. (Previously this fired two streams,
+ * a C2 timeline AND a legacy playMockStream, which double-rendered events.)
+ *
+ * Mock-only testing affordances:
+ *   • task contains "fail" / "error" → emit one `error` (verify the single
+ *     error surface + that the composer re-enables — no resubmit graveyard).
+ *   • task contains "lsp"            → exercise the W3.3 lsp_verify
+ *     errors → fix → clean self-correction lane.
+ *   • mode "fast"                    → skip the plan phase.
+ */
+function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
     _mockCancel?.();
     const emit = (msg: HcodeMessage) => _mockListeners.forEach(fn => fn({ payload: msg }));
     const timers: ReturnType<typeof setTimeout>[] = [];
     let t = 0;
     const after = (ms: number, fn: () => void) => timers.push(setTimeout(fn, t += ms));
-
-    after(0,   () => emit({ type: 'planning_started',  payload: { timestamp: Date.now() } }));
-    after(300, () => emit({ type: 'streaming_chunk',   payload: { content: `Analyzing: "${task}"`, phase: 'plan' } }));
-    after(300, () => emit({ type: 'streaming_chunk',   payload: { content: '\nBuilding plan…', phase: 'plan' } }));
-    after(400, () => emit({ type: 'plan_created',      payload: { markdown: `## Plan\n1. ${task}\n2. Verify`, taskMd: task, implementationPlanMd: `Implement: ${task}`, timestamp: Date.now() } }));
-    after(300, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
-    after(200, () => emit({ type: 'task_update',       payload: { markdown: '**Running tool:** `write`', step: 'tool:write' } }));
-    after(200, () => emit({ type: 'streaming_chunk',   payload: { content: 'Executing…', phase: 'execute' } }));
-    after(200, () => emit({ type: 'task_update',       payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
-    after(100, () => emit({ type: 'file_patch',        payload: { path: 'src/output.py', diff: `@@ -1,2 +1,5 @@\n+# ${task}\n+\ndef main():\n    pass`, backup: '', originalContent: 'def main():\n    pass\n', newContent: `# ${task}\n\ndef main():\n    """${task}"""\n    pass\n` } }));
-    after(300, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
-    after(300, () => emit({ type: 'streaming_chunk',   payload: { content: 'Verifying…', phase: 'verify' } }));
-    after(300, () => emit({ type: 'verification',      payload: { markdown: `**Passed.** "${task}" complete.`, passed: true, testResults: '5/5 passed' } }));
-    after(200, () => emit({ type: 'done' }));
-
     _mockCancel = () => timers.forEach(clearTimeout);
 
-    const legacy = playMockStream(createMockEventStream(task), ev => {
-        const m = agentEventToHcodeMessage(ev);
-        if (m) _mockListeners.forEach(fn => fn({ payload: m as HcodeMessage }));
-    }, 600);
-    const prevCancel = _mockCancel;
-    _mockCancel = () => { prevCancel(); legacy(); };
+    const wantsError = /\b(fail|error|boom)\b/i.test(task);
+    const wantsLspLoop = /\blsp\b/i.test(task);
+
+    const patch = {
+        path: 'src/output.py',
+        diff: `@@ -1,2 +1,6 @@\n+# ${task}\n+\n def main():\n-    pass\n+    """${task}"""\n+    return 0`,
+        backup: '',
+        originalContent: 'def main():\n    pass\n',
+        newContent: `# ${task}\n\ndef main():\n    """${task}"""\n    return 0\n`,
+    };
+
+    // ── Plan phase (skipped in fast mode) ──────────────────────────────────
+    if (mode === 'planning') {
+        after(0,   () => emit({ type: 'planning_started', payload: { timestamp: Date.now() } }));
+        after(250, () => emit({ type: 'streaming_chunk',  payload: { content: `Analyzing "${task}"…`, phase: 'plan' } }));
+        after(250, () => emit({ type: 'streaming_chunk',  payload: { content: '\nDrafting steps…', phase: 'plan' } }));
+        if (wantsError) {
+            after(350, () => emit({ type: 'error', payload: { message: 'Connection error.', suggestion: '' } }));
+            return;
+        }
+        after(350, () => emit({ type: 'plan_created', payload: {
+            markdown: `## Plan\n1. Inspect the codebase\n2. ${task}\n3. Run tests & verify`,
+            taskMd: task, implementationPlanMd: `Implement: ${task}`, timestamp: Date.now(),
+        } }));
+    } else if (wantsError) {
+        after(0,   () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
+        after(250, () => emit({ type: 'streaming_chunk',   payload: { content: `Working on: ${task}…`, phase: 'execute' } }));
+        after(300, () => emit({ type: 'error', payload: { message: 'Connection error.', suggestion: '' } }));
+        return;
+    }
+
+    // ── Execute phase ──────────────────────────────────────────────────────
+    after(250, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
+    after(200, () => emit({ type: 'streaming_chunk',   payload: { content: `Implementing ${task}…`, phase: 'execute' } }));
+    after(200, () => emit({ type: 'task_update',       payload: { markdown: '**Running tool:** `write` → `src/output.py`', step: 'tool:write' } }));
+    after(300, () => emit({ type: 'task_update',       payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
+    after(150, () => emit({ type: 'file_patch',        payload: patch }));
+
+    // ── Verify phase (+ optional LSP self-correction loop, the W3.3 lane) ──
+    after(300, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
+    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (1 file)…', step: 'lsp_verify:started' } }));
+    if (wantsLspLoop) {
+        after(350, () => emit({ type: 'task_update', payload: { markdown: '**Language server found 2 error(s)** — looping back to fix.', step: 'lsp_verify:errors' } }));
+        after(300, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
+        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `edit` → `src/output.py`', step: 'tool:edit' } }));
+        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `edit`', step: 'tool_result:edit' } }));
+        after(250, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
+        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (1 file)…', step: 'lsp_verify:started' } }));
+    }
+    after(350, () => emit({ type: 'task_update',     payload: { markdown: '**Language server check passed** — no errors.', step: 'lsp_verify:clean' } }));
+    after(200, () => emit({ type: 'streaming_chunk', payload: { content: 'All checks passed.', phase: 'verify' } }));
+    after(200, () => emit({ type: 'verification',    payload: { markdown: `Task "${task}" complete — tests pass, no type errors.`, passed: true, testResults: '5/5 passed' } }));
+    after(200, () => emit({ type: 'done',            payload: { summary: `Completed: ${task}`, timestamp: Date.now() } }));
 }
 
 async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -201,7 +244,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'connect_mcp_server':    return { status: 'connected',    server: args?.server ?? '' };
         case 'disconnect_mcp_server': return { status: 'disconnected', server: args?.server ?? '' };
         case 'run_workflow': { _fireMock(`run workflow ${args?.workflow ?? 'workflow'}`); return undefined; }
-        case 'run_task':     { _fireMock((args?.task as string) || 'task'); return undefined; }
+        case 'run_task':     { _fireMock((args?.task as string) || 'task', (args?.mode as 'planning' | 'fast') || 'planning'); return undefined; }
         case 'abort_task':        if (_mockCancel) { _mockCancel(); _mockCancel = null; } return undefined;
         case 'approve_plan': case 'reject_plan':
         case 'accept_patch': case 'reject_patch': case 'rollback_all': return undefined;
