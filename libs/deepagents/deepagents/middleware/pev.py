@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Annotated, Any, NotRequired
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
+from langchain_core.messages import AIMessage
 from typing_extensions import TypedDict
 
 from deepagents.middleware._utils import append_to_system_message
@@ -52,8 +53,8 @@ _VERIFY_PROMPT: str = """\
 ## PEV Verification Phase
 
 You are in the VERIFICATION phase. Only these read-only tools are available: \
-read, ls, glob, grep. Do NOT attempt execute or any other tool — they are not \
-available in this phase and will fail.
+read_file, read, ls, glob, grep. Do NOT attempt execute or any other tool — \
+they are not available in this phase and will fail.
 
 Base your verdict on READING the created/modified files and checking them \
 against the plan. Do not modify anything.
@@ -74,7 +75,14 @@ _PHASE_PROMPTS: dict[str, str] = {
     "fast": _FAST_PROMPT,
 }
 
-_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read", "ls", "glob", "grep"})
+# Tool names here must match a tool actually bound at runtime. TWO layers
+# contribute tools: the HCode registry (tools/registry.py — "read") and the
+# deepagents builtin FilesystemMiddleware ("read_file"), which create_deep_agent
+# always composes. Both readers must be whitelisted or verify loses one of them.
+# Guarded by tests/test_tool_name_contracts.py.
+_VERIFY_READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "read", "ls", "glob", "grep"})
+_PHASE_MARKERS: tuple[str, ...] = ("PLAN COMPLETE", "EXECUTION COMPLETE", "VERIFIED OK", "ISSUES FOUND")
+"""Completion/verdict markers; a breaker exit without any of these gets a synthesized status."""
 _MAX_ERRORS: int = 3
 _MAX_ITERATIONS: int = 5
 """Per-phase model-call cap for the plan and verify phases."""
@@ -361,11 +369,22 @@ class PEVMiddleware(AgentMiddleware):
         new_iteration = iteration + 1
         max_iterations = _MAX_EXECUTE_ITERATIONS if phase == "execute" else _MAX_ITERATIONS
         if loop_detected or error_count >= _MAX_ERRORS or new_iteration > max_iterations:
-            return {
+            breaker_update: dict[str, Any] = {
                 "_pev_iteration": new_iteration,
                 "_pev_recent_hashes": recent_hashes,
                 "jump_to": "end",
             }
+            # Honest status: if the final turn carries no phase marker, the UI
+            # would render nothing. Append a negative verdict naming the dead
+            # phase — never a fabricated VERIFIED OK.
+            if not any(marker in last_content.upper() for marker in _PHASE_MARKERS):
+                breaker_update["messages"] = [
+                    AIMessage(
+                        content=f"ISSUES FOUND: {phase} phase did not complete "
+                        "(stopped by iteration cap or circuit breaker)."
+                    )
+                ]
+            return breaker_update
 
         upper = last_content.upper()
         update: dict[str, Any] = {
@@ -388,6 +407,11 @@ class PEVMiddleware(AgentMiddleware):
             update["_pev_phase"] = "verify"
             update["_pev_iteration"] = 0
             update["jump_to"] = "model"
+        elif phase == "execute" and not getattr(last_ai_message, "tool_calls", None):
+            # No marker and no tool calls (e.g. an empty reasoning-only turn):
+            # the model->tools edge would end the run silently. Retry, bounded
+            # by the per-phase iteration cap above — same gap as plan.
+            update["jump_to"] = "model"
         elif phase == "verify":
             if "VERIFIED OK" in upper:
                 update["jump_to"] = "end"
@@ -395,6 +419,10 @@ class PEVMiddleware(AgentMiddleware):
                 update["_pev_phase"] = "execute"
                 update["_pev_iteration"] = 0
                 update["_pev_error_count"] = error_count + 1
+                update["jump_to"] = "model"
+            elif not getattr(last_ai_message, "tool_calls", None):
+                # No verdict and no tool calls: re-prompt for a verdict
+                # instead of ending silently; the iteration cap bounds it.
                 update["jump_to"] = "model"
 
         return update

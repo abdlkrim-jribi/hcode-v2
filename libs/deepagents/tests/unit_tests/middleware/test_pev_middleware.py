@@ -252,7 +252,7 @@ class TestPEVMiddlewarePromptInjection:
         assert captured is not None
         text = self._system_text(captured)
         # names the available read-only tools (must match _VERIFY_READONLY_TOOLS)
-        assert "read, ls, glob, grep" in text
+        assert "read_file, read, ls, glob, grep" in text
         # explicitly calls out execute (and other tools) as unavailable
         assert "execute" in text
         assert "Do NOT" in text
@@ -267,9 +267,15 @@ class TestPEVMiddlewarePromptInjection:
         assert captured.system_message is None
 
     def test_verify_keeps_only_readonly_tools(self) -> None:
+        # read_file is the deepagents filesystem-middleware reader; read is the
+        # hcode registry reader. Verify must keep BOTH (probe-proven: the model
+        # called read_file, which wasn't whitelisted, and wasted verify turns).
         tools = [
             make_mock_tool("read"),
+            make_mock_tool("read_file"),
             make_mock_tool("write"),
+            make_mock_tool("write_file"),
+            make_mock_tool("execute"),
             make_mock_tool("ls"),
             make_mock_tool("bash"),
             make_mock_tool("grep"),
@@ -277,7 +283,7 @@ class TestPEVMiddlewarePromptInjection:
         captured = self._call_wrap(make_pev_state(phase="verify"), tools=tools)
         assert captured is not None
         remaining = {t.name for t in captured.tools}
-        assert remaining == {"read", "ls", "grep"}
+        assert remaining == {"read", "read_file", "ls", "grep"}
 
     def test_non_verify_phase_does_not_filter_tools(self) -> None:
         tools = [make_mock_tool("read"), make_mock_tool("write"), make_mock_tool("bash")]
@@ -449,6 +455,102 @@ class TestPEVMiddlewareTransitions:
         assert result is not None
         assert result["jump_to"] == "model"
         assert result["_pev_iteration"] == 1
+
+    def test_markerless_execute_without_tools_retries_model(self) -> None:
+        # Same silent-death gap as the plan phase (PR-PEV-3): an execute-phase
+        # turn with no EXECUTION COMPLETE and no tool calls (e.g. an empty
+        # reasoning-only finish_reason='stop' turn) used to fall through with
+        # no jump_to and end the run silently. It must retry the model.
+        state = make_pev_state(
+            messages=[AIMessage(content="")],
+            phase="execute",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "model"
+        assert result["_pev_iteration"] == 1
+
+    def test_markerless_verify_without_tools_retries_model(self) -> None:
+        # Verify-phase variant: no VERIFIED OK / ISSUES FOUND and no tool
+        # calls must re-prompt for a verdict, not end the run silently.
+        state = make_pev_state(
+            messages=[AIMessage(content="Let me look at the files.")],
+            phase="verify",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "model"
+        assert result["_pev_iteration"] == 1
+
+    def test_markerless_retry_is_bounded_by_phase_caps(self) -> None:
+        # The new retries stay bounded by the EXISTING per-phase caps: at the
+        # cap the breaker (checked before any retry) ends the run.
+        execute_at_cap = make_pev_state(
+            messages=[AIMessage(content="")],
+            phase="execute",
+            iteration=15,  # _MAX_EXECUTE_ITERATIONS
+        )
+        result = self._after_model(execute_at_cap)
+        assert result is not None
+        assert result["jump_to"] == "end"
+
+        verify_at_cap = make_pev_state(
+            messages=[AIMessage(content="Still looking around.")],
+            phase="verify",
+            iteration=5,  # _MAX_ITERATIONS
+        )
+        result = self._after_model(verify_at_cap)
+        assert result is not None
+        assert result["jump_to"] == "end"
+
+    def test_execute_turn_with_tool_calls_does_not_retry(self) -> None:
+        # A normal tool-call turn must keep flowing to the tools node — the
+        # retry only fires when there is neither a marker nor a tool call.
+        state = make_pev_state(
+            messages=[AIMessage(
+                content="",
+                tool_calls=[{"name": "write", "args": {"path": "f.py"}, "id": "c1", "type": "tool_call"}],
+            )],
+            phase="execute",
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert "jump_to" not in result
+
+    def test_cap_exit_without_marker_synthesizes_issues_found(self) -> None:
+        # Honest status (PR-PEV-3, Fix D): a cap/breaker exit on a markerless
+        # turn used to end the run with nothing for the UI to render. It must
+        # append a negative ISSUES FOUND status naming the dead phase.
+        state = make_pev_state(
+            messages=[AIMessage(content="still working")],
+            phase="execute",
+            iteration=15,  # _MAX_EXECUTE_ITERATIONS -> cap fires
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "end"
+        synthesized = result["messages"]
+        assert len(synthesized) == 1
+        text = synthesized[0].content
+        assert "ISSUES FOUND" in text
+        assert "execute" in text
+        assert "did not complete" in text
+        # never fabricate a positive verdict
+        assert "VERIFIED OK" not in text
+
+    def test_breaker_exit_with_marker_does_not_synthesize_status(self) -> None:
+        # If the final turn already carries a marker (here the model's own
+        # ISSUES FOUND as the error breaker fires), the UI has honest output —
+        # nothing is appended.
+        state = make_pev_state(
+            messages=[AIMessage(content="ISSUES FOUND: tests still failing")],
+            phase="verify",
+            error_count=3,  # _MAX_ERRORS -> breaker fires
+        )
+        result = self._after_model(state)
+        assert result is not None
+        assert result["jump_to"] == "end"
+        assert "messages" not in result
 
     def test_iteration_counter_incremented(self) -> None:
         state = make_pev_state(

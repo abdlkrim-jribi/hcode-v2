@@ -32,7 +32,9 @@ from deepagents.middleware.workflows import WorkflowMiddleware
 TASK = "create calc.py with add(a,b) and a test for it in test_calc.py"
 
 STUB_TOOL_NAMES = {"write", "read", "ls", "glob", "grep"}
-VERIFY_READONLY_NAMES = {"read", "ls", "glob", "grep"}
+# read_file is the deepagents builtin reader injected by the filesystem
+# middleware; PEV's verify whitelist keeps it alongside the hcode-style read.
+VERIFY_READONLY_NAMES = {"read", "read_file", "ls", "glob", "grep"}
 
 
 # ── Stub tools (names match the real hcode registry / PEV verify filter) ─────
