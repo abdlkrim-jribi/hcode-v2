@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+from datetime import date
 from pathlib import Path
 
 from deepagents import create_deep_agent
@@ -67,6 +69,26 @@ def _build_model():
     return maybe_wrap(base_model, config.toolcall_mode)
 
 
+def _build_env_block(work_dir: str) -> str:
+    """Build the OpenCode-style ``<env>`` orientation block for the system prompt.
+
+    Declarative facts only (working directory, platform, git-repo flag, date) so
+    the model knows where it is and stops wandering the real filesystem (``ls /``)
+    in the execute phase. The path is the resolved absolute working directory —
+    the form the shell/execute tools and HCode's own file tools actually use.
+    """
+    root = Path(work_dir).resolve()
+    is_git = "yes" if (root / ".git").exists() else "no"
+    return (
+        "<env>\n"
+        f"Working directory: {root}\n"
+        f"Platform: {platform.system()}\n"
+        f"Is git repo: {is_git}\n"
+        f"Today's date: {date.today().isoformat()}\n"
+        "</env>"
+    )
+
+
 async def create_hcode_agent(
     skills_dir: str = ".hcode/skills",
     workflows_dir: str = ".hcode/workflows",
@@ -100,6 +122,10 @@ async def create_hcode_agent(
     # `python` / `pytest` are never found and the execute phase dead-ends.
     # Inheriting the full env is a conscious trade-off for a local dev CLI.
     resolved_work_dir = work_dir or os.getcwd()
+    # Align HCode's registry tools (get_root_dir reads HCODE_ROOT_DIR) with the
+    # backend root and the <env> block, so the directory the model is TOLD about
+    # is the one its file/shell tools actually resolve against.
+    os.environ["HCODE_ROOT_DIR"] = str(Path(resolved_work_dir).resolve())
     # PYTHONIOENCODING/PYTHONUTF8 force Python children (pytest) to emit UTF-8
     # even when stdout is a pipe — otherwise they write the Windows ANSI code
     # page (cp1252/cp1256) and the reader's UTF-8 decode hits invalid bytes.
@@ -141,4 +167,7 @@ async def create_hcode_agent(
         middleware=middleware,
         backend=backend,
         checkpointer=checkpointer,
+        # Prepended above BASE_AGENT_PROMPT (USER segment); PEV appends its phase
+        # prompts below, so this orientation block is present in every phase.
+        system_prompt=_build_env_block(resolved_work_dir),
     )
