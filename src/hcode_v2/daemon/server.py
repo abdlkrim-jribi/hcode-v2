@@ -222,46 +222,103 @@ class JsonRpcDaemon:
             self.emit_event("error", {"message": str(exc), "recoverable": False})
 
     async def _mock_streaming_task(self, task: str) -> None:
-        """Mock run_task that emits realistic streaming events without a live model."""
-        await asyncio.sleep(0)
-        self.emit_event("planning_started", {"timestamp": 0})
+        """Mock run_task that emits the FULL keyless-demo story without a live model.
 
-        # Emit token stream simulating a plan
-        plan_tokens = ["I ", "will ", "complete: ", task, " "]
-        for token in plan_tokens:
-            self.emit_event("streaming_chunk", {"content": token, "phase": "plan"})
+        Emits the SAME event shapes the real StreamingBridge produces, so the UI
+        cannot tell mock from live. The arc:
+            planning -> plan -> execute (two file patches) -> LSP self-correction
+            (started -> 1 type error -> fix -> clean) -> verification passed -> done
+
+        This is what makes the W3 LSP self-correction visible in every keyless
+        path (Docker mock, ``dev.py --mock``, the launcher). It does NOT touch the
+        real (non-mock) ``run_task`` path above.
+
+        Event-shape sources (kept byte-compatible with live):
+          - ``lsp_verify`` lines == bridge.py ``_handle_custom_event`` output:
+            ``task_update`` with step ``lsp_verify:started|errors|clean``.
+          - ``file_patch`` payload == the FilePatchPayload the UI reducer consumes.
+        """
+        async def step(type_: str, payload: dict | None = None) -> None:
+            self.emit_event(type_, payload)
             await asyncio.sleep(0)
 
-        # Emit PLAN COMPLETE marker (triggers phase transition in a real bridge)
-        self.emit_event("streaming_chunk", {"content": "PLAN COMPLETE", "phase": "plan"})
-        await asyncio.sleep(0)
-        self.emit_event("plan_created", {
-            "markdown": f"I will complete: {task} PLAN COMPLETE",
+        # ── Plan ────────────────────────────────────────────────────────────
+        await step("planning_started", {"timestamp": 0})
+        for token in ("Analyzing the request", " and the codebase", "...\n",
+                      "Drafting a step-by-step plan."):
+            await step("streaming_chunk", {"content": token, "phase": "plan"})
+        plan_md = (
+            f"## Plan for: {task}\n"
+            "1. Add `greet()` to `src/hello.py`\n"
+            "2. Add a `shout()` helper to `src/utils.py`\n"
+            "3. Type-check with the language server and fix any errors\n"
+            "4. Verify"
+        )
+        await step("plan_created", {
+            "markdown": plan_md,
             "taskMd": task,
-            "implementationPlanMd": f"I will complete: {task} PLAN COMPLETE",
+            "implementationPlanMd": plan_md,
             "timestamp": 0,
         })
-        self.emit_event("execution_started", {"timestamp": 0})
 
-        # Simulate a tool call
-        self.emit_event("task_update", {
-            "markdown": "**Running tool:** `echo`",
-            "step": "tool:echo",
+        # ── Execute: two files ──────────────────────────────────────────────
+        await step("execution_started", {"timestamp": 0})
+        await step("streaming_chunk", {"content": "Writing the two files...", "phase": "execute"})
+
+        await step("task_update", {"markdown": "**Running tool:** `write` -> `src/hello.py`", "step": "tool:write"})
+        await step("task_update", {"markdown": "**Tool done:** `write`", "step": "tool_result:write"})
+        await step("file_patch", {
+            "path": "src/hello.py",
+            "diff": '@@ -0,0 +1,3 @@\n+def greet(name: str) -> int:\n+    # returns a str but is annotated -> int\n+    return "Hello, " + name',
+            "backup": "",
+            "originalContent": "",
+            "newContent": 'def greet(name: str) -> int:\n    # returns a str but is annotated -> int\n    return "Hello, " + name\n',
         })
-        await asyncio.sleep(0)
-        self.emit_event("task_update", {
-            "markdown": "**Tool done:** `echo`",
-            "step": "tool_result:echo",
+
+        await step("task_update", {"markdown": "**Running tool:** `write` -> `src/utils.py`", "step": "tool:write"})
+        await step("task_update", {"markdown": "**Tool done:** `write`", "step": "tool_result:write"})
+        await step("file_patch", {
+            "path": "src/utils.py",
+            "diff": '@@ -0,0 +1,2 @@\n+def shout(text: str) -> str:\n+    return text.upper() + "!"',
+            "backup": "",
+            "originalContent": "",
+            "newContent": 'def shout(text: str) -> str:\n    return text.upper() + "!"\n',
         })
-        await asyncio.sleep(0)
 
-        # Execution done
-        self.emit_event("streaming_chunk", {"content": "EXECUTION COMPLETE", "phase": "execute"})
-        await asyncio.sleep(0)
-        self.emit_event("verification_started", {"timestamp": 0})
-        await asyncio.sleep(0)
+        # ── Verify with the language server: error -> fix -> clean ──────────
+        await step("verification_started", {"timestamp": 0})
+        await step("task_update", {
+            "markdown": "**Verifying with language server** (2 files)...",
+            "step": "lsp_verify:started",
+        })
+        await step("task_update", {
+            "markdown": "**Language server found 1 error** - `src/hello.py:3` "
+                        "Incompatible return type: expected `int`, got `str`. Looping back to fix.",
+            "step": "lsp_verify:errors",
+        })
+        await step("task_update", {"markdown": "**Running tool:** `edit` -> `src/hello.py`", "step": "tool:edit"})
+        await step("task_update", {"markdown": "**Tool done:** `edit`", "step": "tool_result:edit"})
+        # Re-propose the SAME path with corrected content (exercises diff dedupe).
+        await step("file_patch", {
+            "path": "src/hello.py",
+            "diff": '@@ -1,3 +1,2 @@\n-def greet(name: str) -> int:\n-    # returns a str but is annotated -> int\n-    return "Hello, " + name\n+def greet(name: str) -> str:\n+    return f"Hello, {name}"',
+            "backup": "",
+            "originalContent": 'def greet(name: str) -> int:\n    # returns a str but is annotated -> int\n    return "Hello, " + name\n',
+            "newContent": 'def greet(name: str) -> str:\n    return f"Hello, {name}"\n',
+        })
+        await step("task_update", {
+            "markdown": "**Language server check passed** - no errors.",
+            "step": "lsp_verify:clean",
+        })
 
-        self.emit_event("done", {"summary": f"[mock] completed: {task}", "timestamp": 0})
+        # ── Done ────────────────────────────────────────────────────────────
+        await step("streaming_chunk", {"content": "All checks pass. ", "phase": "verify"})
+        await step("verification", {
+            "markdown": f"Task complete: {task}. 2 files changed, type-checked clean.",
+            "passed": True,
+            "testResults": "2 files - 0 type errors",
+        })
+        await step("done", {"summary": f"[mock] completed: {task}", "timestamp": 0})
 
     # ── Main read loop ────────────────────────────────────────────────────────
 
