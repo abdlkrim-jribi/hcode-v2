@@ -169,6 +169,12 @@ class JsonRpcDaemon:
     # ── Async task dispatch ───────────────────────────────────────────────────
 
     async def _handle_run_task_dispatch(self, req_id: Any, params: dict) -> None:
+        # Single-flight: refuse a new task while one is still running rather than
+        # overwriting _current_task (which would also open a same-session
+        # concurrent-write path on the session db).
+        if self._current_task is not None and not self._current_task.done():
+            self.send_response(req_id, error={"code": -32000, "message": "A task is already running"})
+            return
         task: str = params.get("task", "")
         thread_id: str = params.get("thread_id") or f"gui_{abs(hash(task))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id))
