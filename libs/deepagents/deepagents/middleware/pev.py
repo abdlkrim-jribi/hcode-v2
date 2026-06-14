@@ -42,10 +42,25 @@ PLAN COMPLETE"""
 _EXECUTE_PROMPT: str = """\
 ## PEV Execution Phase
 
-Execute the plan from the previous step one step at a time.
-Use available tools to accomplish each step.
+You are in the EXECUTION phase. Carry out the plan from the previous step.
 
-When all steps are complete and results are correct, output this marker alone on its own line:
+Work in the real working directory shown in the environment block above; use
+real paths and stay inside the project — do not roam the wider filesystem.
+
+Before you change a file, Read it first so you have full context. Match the
+file's existing conventions: mimic its style and reuse the patterns and
+utilities already present. Do not assume a library is available — check that
+the codebase already uses it (look at neighboring files or the project's
+dependency manifest) before relying on it.
+
+Work through every step of the plan; do not stop after one step or hand back a
+partial result. If a step fails, do not keep retrying the same way — find the
+root cause first, then fix it.
+
+Communicate in your output text, not through tool calls or code comments.
+
+When all steps are done and the results are correct, output this marker alone
+on its own line:
 EXECUTION COMPLETE"""
 
 # Tool names listed here must match _VERIFY_READONLY_TOOLS below.
