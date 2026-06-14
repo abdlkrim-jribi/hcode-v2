@@ -57,6 +57,10 @@ class JsonRpcDaemon:
         self._mcp_config = mcp_config
         self._running = True
         self._current_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        # Per-session agent cache, keyed by thread_id. Mirrors the CLI's
+        # build-once-reuse pattern (cli/main.py:196) so a session keeps its
+        # memory across run_task calls instead of rebuilding every task.
+        self._agents: dict[str, Any] = {}
 
         self._real_stdout = sys.stdout
         sys.stdout = sys.stderr
@@ -193,13 +197,20 @@ class JsonRpcDaemon:
         bridge.on_task_start()
 
         try:
-            agent = await create_hcode_agent(
-                skills_dir=self._skills_dir,
-                workflows_dir=self._workflows_dir,
-                mcp_config=self._mcp_config,
-                session_id=thread_id,
-                persist=False,
-            )
+            # Build the agent once per session and reuse it for later tasks on
+            # the same thread_id. persist=True routes state through the SQLite
+            # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
+            # across tasks and are resumable — matching the CLI.
+            agent = self._agents.get(thread_id)
+            if agent is None:
+                agent = await create_hcode_agent(
+                    skills_dir=self._skills_dir,
+                    workflows_dir=self._workflows_dir,
+                    mcp_config=self._mcp_config,
+                    session_id=thread_id,
+                    persist=True,
+                )
+                self._agents[thread_id] = agent
             last_text = ""
             async for event in agent.astream_events(
                 {"messages": [HumanMessage(content=task)]},
