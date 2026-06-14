@@ -194,10 +194,20 @@ def test_run_task_returns_started_then_done(daemon):
 
 
 def test_run_task_custom_thread_id(daemon):
+    # A client-supplied thread_id passes through verbatim (no gui_ prefix added),
+    # so the GUI can resume a named or CLI-created session.
     _send(daemon, "run_task", {"task": "ping", "thread_id": "my-thread"}, req_id=60)
     started = _read(daemon)
     assert started["result"]["thread_id"] == "my-thread"
     _drain_until_done(daemon)  # consume all events including done
+
+
+def test_run_task_auto_thread_id_has_gui_prefix(daemon):
+    # No client thread_id -> daemon auto-generates one namespaced under gui_.
+    _send(daemon, "run_task", {"task": "say hello"}, req_id=61)
+    started = _read(daemon)
+    assert started["result"]["thread_id"].startswith("gui_")
+    _drain_until_done(daemon)
 
 
 # ── run_workflow ──────────────────────────────────────────────────────────────
@@ -212,6 +222,13 @@ def test_run_workflow_returns_started_then_done(daemon):
     events = _drain_until_done(daemon)
     done_evts = [e for e in events if e.get("type") == "done"]
     assert done_evts, f"No done event: {[e.get('type') for e in events]}"
+
+
+def test_run_workflow_auto_thread_id_has_gui_wf_prefix(daemon):
+    _send(daemon, "run_workflow", {"workflow": "build"}, req_id=71)
+    started = _read(daemon)
+    assert started["result"]["thread_id"].startswith("gui_wf_")
+    _drain_until_done(daemon)
 
 
 # ── unknown method ────────────────────────────────────────────────────────────

@@ -160,12 +160,12 @@ class JsonRpcDaemon:
 
     async def _handle_run_task_dispatch(self, req_id: Any, params: dict) -> None:
         task: str = params.get("task", "")
-        thread_id: str = params.get("thread_id") or f"daemon_{abs(hash(task))}"
+        thread_id: str = params.get("thread_id") or f"gui_{abs(hash(task))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id))
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
         name: str = params.get("workflow", "")
-        thread_id: str = params.get("thread_id") or f"daemon_wf_{abs(hash(name))}"
+        thread_id: str = params.get("thread_id") or f"gui_wf_{abs(hash(name))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, f"run workflow {name}", thread_id))
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
