@@ -148,20 +148,39 @@ const MOCK_MCP_SERVERS = [
     { id: 'brave',      name: 'brave',      description: 'Web search',          status: 'disconnected', toolCount: 1 },
 ];
 
+// Mock workspace shown when Open Folder is used in pure-mock (VITE_MOCK) mode,
+// so the file tree never hangs on "Loading files..." (mock used to return []).
+const MOCK_ROOT_TREE: FileEntry[] = [
+    { name: 'src',            path: '/mock-project/src',            isDirectory: true },
+    { name: 'README.md',      path: '/mock-project/README.md',      isDirectory: false },
+    { name: 'pyproject.toml', path: '/mock-project/pyproject.toml', isDirectory: false },
+];
+const MOCK_SRC_TREE: FileEntry[] = [
+    { name: 'hello.py', path: '/mock-project/src/hello.py', isDirectory: false },
+    { name: 'utils.py', path: '/mock-project/src/utils.py', isDirectory: false },
+];
+const MOCK_FILES: Record<string, string> = {
+    '/mock-project/README.md': '# Mock Project\n\nA demo workspace shown in mock mode (no real files on disk).\n',
+    '/mock-project/pyproject.toml': '[project]\nname = "mock-project"\nversion = "0.1.0"\n',
+    '/mock-project/src/hello.py': 'def greet(name: str) -> str:\n    return f"Hello, {name}"\n',
+    '/mock-project/src/utils.py': 'def shout(text: str) -> str:\n    return text.upper() + "!"\n',
+};
+
 let _mockListeners: Array<(e: { payload: unknown }) => void> = [];
 let _mockCancel: (() => void) | null = null;
 
 /**
- * Emit a SINGLE coherent mock event stream for one task — exactly the event
- * vocabulary bridge.py emits in live mode. (Previously this fired two streams,
- * a C2 timeline AND a legacy playMockStream, which double-rendered events.)
+ * Emit a SINGLE coherent mock event stream for one task -- the SAME event
+ * vocabulary bridge.py emits in live mode, telling the FULL demo story:
+ * streaming -> plan -> two file patches -> LSP self-correction
+ * (started -> 1 type error -> fix -> clean) -> verification passed -> done.
+ * Mirrors the daemon's _mock_streaming_task so the VITE_MOCK path and the
+ * daemon mock (dev.py --mock, Docker) tell the same story.
  *
  * Mock-only testing affordances:
- *   • task contains "fail" / "error" → emit one `error` (verify the single
- *     error surface + that the composer re-enables — no resubmit graveyard).
- *   • task contains "lsp"            → exercise the W3.3 lsp_verify
- *     errors → fix → clean self-correction lane.
- *   • mode "fast"                    → skip the plan phase.
+ *   - task contains "fail" / "error" -> emit one `error` (single error surface,
+ *     composer re-enables -- no resubmit graveyard).
+ *   - mode "fast" -> skip the plan phase.
  */
 function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
     _mockCancel?.();
@@ -172,14 +191,29 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
     _mockCancel = () => timers.forEach(clearTimeout);
 
     const wantsError = /\b(fail|error|boom)\b/i.test(task);
-    const wantsLspLoop = /\blsp\b/i.test(task);
 
-    const patch = {
-        path: 'src/output.py',
-        diff: `@@ -1,2 +1,6 @@\n+# ${task}\n+\n def main():\n-    pass\n+    """${task}"""\n+    return 0`,
+    // Two files; hello.py is first written with a type error, then re-proposed
+    // corrected after the LSP catches it (same path -> exercises diff dedupe).
+    const helloBad = {
+        path: 'src/hello.py',
+        diff: '@@ -0,0 +1,3 @@\n+def greet(name: str) -> int:\n+    # returns a str but is annotated -> int\n+    return "Hello, " + name',
         backup: '',
-        originalContent: 'def main():\n    pass\n',
-        newContent: `# ${task}\n\ndef main():\n    """${task}"""\n    return 0\n`,
+        originalContent: '',
+        newContent: 'def greet(name: str) -> int:\n    # returns a str but is annotated -> int\n    return "Hello, " + name\n',
+    };
+    const utils = {
+        path: 'src/utils.py',
+        diff: '@@ -0,0 +1,2 @@\n+def shout(text: str) -> str:\n+    return text.upper() + "!"',
+        backup: '',
+        originalContent: '',
+        newContent: 'def shout(text: str) -> str:\n    return text.upper() + "!"\n',
+    };
+    const helloFixed = {
+        path: 'src/hello.py',
+        diff: '@@ -1,3 +1,2 @@\n-def greet(name: str) -> int:\n-    # returns a str but is annotated -> int\n-    return "Hello, " + name\n+def greet(name: str) -> str:\n+    return f"Hello, {name}"',
+        backup: '',
+        originalContent: 'def greet(name: str) -> int:\n    # returns a str but is annotated -> int\n    return "Hello, " + name\n',
+        newContent: 'def greet(name: str) -> str:\n    return f"Hello, {name}"\n',
     };
 
     // ── Plan phase (skipped in fast mode) ──────────────────────────────────
@@ -202,28 +236,27 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
         return;
     }
 
-    // ── Execute phase ──────────────────────────────────────────────────────
+    // ── Execute: two files ──────────────────────────────────────────────────
     after(250, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
-    after(200, () => emit({ type: 'streaming_chunk',   payload: { content: `Implementing ${task}…`, phase: 'execute' } }));
-    after(200, () => emit({ type: 'task_update',       payload: { markdown: '**Running tool:** `write` → `src/output.py`', step: 'tool:write' } }));
-    after(300, () => emit({ type: 'task_update',       payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
-    after(150, () => emit({ type: 'file_patch',        payload: patch }));
+    after(200, () => emit({ type: 'streaming_chunk',   payload: { content: 'Writing the two files...', phase: 'execute' } }));
+    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/hello.py`', step: 'tool:write' } }));
+    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
+    after(150, () => emit({ type: 'file_patch', payload: helloBad }));
+    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/utils.py`', step: 'tool:write' } }));
+    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
+    after(150, () => emit({ type: 'file_patch', payload: utils }));
 
-    // ── Verify phase (+ optional LSP self-correction loop, the W3.3 lane) ──
+    // ── Verify with LSP: error -> fix -> clean (always shown, the W3.3 lane) ─
     after(300, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
-    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (1 file)…', step: 'lsp_verify:started' } }));
-    if (wantsLspLoop) {
-        after(350, () => emit({ type: 'task_update', payload: { markdown: '**Language server found 2 error(s)** — looping back to fix.', step: 'lsp_verify:errors' } }));
-        after(300, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
-        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `edit` → `src/output.py`', step: 'tool:edit' } }));
-        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `edit`', step: 'tool_result:edit' } }));
-        after(250, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
-        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (1 file)…', step: 'lsp_verify:started' } }));
-    }
-    after(350, () => emit({ type: 'task_update',     payload: { markdown: '**Language server check passed** — no errors.', step: 'lsp_verify:clean' } }));
-    after(200, () => emit({ type: 'streaming_chunk', payload: { content: 'All checks passed.', phase: 'verify' } }));
-    after(200, () => emit({ type: 'verification',    payload: { markdown: `Task "${task}" complete — tests pass, no type errors.`, passed: true, testResults: '5/5 passed' } }));
-    after(200, () => emit({ type: 'done',            payload: { summary: `Completed: ${task}`, timestamp: Date.now() } }));
+    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (2 files)...', step: 'lsp_verify:started' } }));
+    after(350, () => emit({ type: 'task_update', payload: { markdown: '**Language server found 1 error** - `src/hello.py:3` expected `int`, got `str`. Looping back to fix.', step: 'lsp_verify:errors' } }));
+    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `edit` -> `src/hello.py`', step: 'tool:edit' } }));
+    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `edit`', step: 'tool_result:edit' } }));
+    after(150, () => emit({ type: 'file_patch', payload: helloFixed }));
+    after(300, () => emit({ type: 'task_update', payload: { markdown: '**Language server check passed** - no errors.', step: 'lsp_verify:clean' } }));
+    after(200, () => emit({ type: 'streaming_chunk', payload: { content: 'All checks pass.', phase: 'verify' } }));
+    after(200, () => emit({ type: 'verification', payload: { markdown: `Task "${task}" complete - 2 files changed, type-checked clean.`, passed: true, testResults: '2 files - 0 type errors' } }));
+    after(200, () => emit({ type: 'done', payload: { summary: `Completed: ${task}`, timestamp: Date.now() } }));
 }
 
 async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -232,9 +265,12 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'start_daemon': case 'daemon_health':
             return { status: 'running', uptime: 0, pid: 0, version: '2.0.0' } satisfies DaemonInfo;
         case 'stop_daemon':       return undefined;
-        case 'open_folder_dialog': return '/project';
-        case 'list_directory':    return [];
-        case 'read_file':         return '';
+        case 'open_folder_dialog': return '/mock-project';
+        case 'list_directory': {
+            const p = String(args?.path ?? '');
+            return (p.endsWith('/src') || p.endsWith('\\src')) ? MOCK_SRC_TREE : MOCK_ROOT_TREE;
+        }
+        case 'read_file':         return MOCK_FILES[String(args?.path ?? '')] ?? '# (mock) empty file\n';
         case 'write_file':        return undefined;
         case 'save_api_key':      return undefined;
         case 'get_api_key':       return null;
