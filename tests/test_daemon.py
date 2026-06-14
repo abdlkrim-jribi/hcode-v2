@@ -121,6 +121,30 @@ def test_list_workflows_finds_md_files(tmp_path: Path):
         proc.wait(timeout=5)
 
 
+# ── list_sessions ─────────────────────────────────────────────────────────────
+
+def test_list_sessions_empty(daemon):
+    _send(daemon, "list_sessions", req_id=8)
+    resp = _read(daemon)
+    assert resp["id"] == 8
+    assert resp["result"]["sessions"] == []
+
+
+def test_list_sessions_finds_dbs(tmp_path: Path):
+    sessions = tmp_path / ".hcode" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "a.db").write_text("")
+    (sessions / "b.db").write_text("")
+    proc = _start_daemon(tmp_path)
+    try:
+        _send(proc, "list_sessions", req_id=80)
+        resp = _read(proc)
+        assert resp["result"]["sessions"] == ["a", "b"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 # ── list_mcp_servers ──────────────────────────────────────────────────────────
 
 def test_list_mcp_servers(daemon):

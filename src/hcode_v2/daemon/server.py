@@ -90,6 +90,7 @@ class JsonRpcDaemon:
             elif method == "run_workflow":         await self._handle_run_workflow_dispatch(req_id, params)
             elif method == "list_skills":          await self._handle_list_skills(req_id)
             elif method == "list_workflows":       await self._handle_list_workflows(req_id)
+            elif method == "list_sessions":        await self._handle_list_sessions(req_id)
             elif method == "list_mcp_servers":     await self._handle_list_mcp_servers(req_id)
             elif method == "connect_mcp_server":   await self._handle_connect_mcp_server(req_id, params)
             elif method == "disconnect_mcp_server": await self._handle_disconnect_mcp_server(req_id, params)
@@ -117,6 +118,11 @@ class JsonRpcDaemon:
         root = Path(self._workflows_dir)
         workflows = (sorted(p.stem for p in root.glob("*.md")) if root.is_dir() else [])
         self.send_response(req_id, {"workflows": workflows})
+
+    async def _handle_list_sessions(self, req_id: Any) -> None:
+        root = Path(".hcode/sessions")
+        sessions = (sorted(p.stem for p in root.glob("*.db")) if root.is_dir() else [])
+        self.send_response(req_id, {"sessions": sessions})
 
     async def _handle_list_mcp_servers(self, req_id: Any) -> None:
         from deepagents.mcp.client import MCPClientManager
