@@ -2,9 +2,13 @@
  * Shared TypeScript types for the Hcode v2 Desktop App.
  * Protocol types for IPC between React UI ↔ Tauri shell ↔ v2 Python daemon.
  *
- * v2 additions vs v1:
- *  - HcodeMessage extended with C2 streaming events emitted by bridge.py
- *  - DaemonInfo kept for mock / Tauri health response
+ * v3 (agent-chat rebuild):
+ *  - AppState is now a CONVERSATION of `turns[]`, not a single flat task.
+ *    Each task the user submits APPENDS a Turn; prior turns are never wiped.
+ *    All agent output (plan, streamed text, diffs, verification, errors) is
+ *    scoped to the turn it belongs to — see `Turn` below.
+ *  - HcodeMessage (the wire protocol) is unchanged: bridge.py / the mock
+ *    daemon still emit the same events; the UI just routes them per-turn.
  */
 
 // ── File System ────────────────────────────────────────────────────────────
@@ -60,6 +64,7 @@ export interface CircuitBreakPayload { reason: string }
 export interface LogPayload          { line: string; stream: 'stdout' | 'stderr' }
 
 // ── HcodeMessage — wire protocol (v1 legacy + v2 C2 streaming events) ─────────
+// Unchanged contract — the new chat UI must keep handling ALL of these.
 
 export type HcodeMessage =
     // ── v1 legacy events ────────────────────────────────────────────────────
@@ -72,7 +77,6 @@ export type HcodeMessage =
     | { type: 'log';           payload: LogPayload }
     | { type: 'agent_phase';   phase: AgentPhase }
     | { type: 'ready' }
-    | { type: 'done' }
     // ── v2 C2 streaming events (emitted by bridge.py / mock daemon) ─────────
     | { type: 'streaming_chunk';     payload: { content: string; phase: string } }
     | { type: 'planning_started';    payload: { timestamp: number } }
@@ -81,34 +85,75 @@ export type HcodeMessage =
     | { type: 'plan_created';        payload: { markdown: string; taskMd: string; implementationPlanMd: string; timestamp?: number } }
     | { type: 'done';                payload?: { summary?: string; timestamp?: number } };
 
-// ── AppState ──────────────────────────────────────────────────────────────────
+// ── Conversation model — Turn ──────────────────────────────────────────────────
 
-export interface ChatMessage {
+/** One unit of work inside a turn: a tool run, an LSP check, or an info line. */
+export interface ToolActivity {
     id: string;
-    type: 'user' | 'agent' | 'system' | 'agent_phase';
-    content: string;
-    timestamp: string;
-    phase?: AgentPhase;
+    kind: 'tool' | 'lsp' | 'info';
+    /** Display text (already human-readable; may contain markdown emphasis). */
+    label: string;
+    /** Raw `step` from the daemon, e.g. "tool:write" / "lsp_verify:clean". */
+    step?: string;
+    /** Tool name, parsed from `tool:<name>` — used to mark completion. */
+    toolName?: string;
+    /** W3.3 LSP Verify lane status. */
+    lspStatus?: 'started' | 'errors' | 'clean';
+    /** True once the matching tool_result / terminal lsp status arrived. */
+    done?: boolean;
 }
 
-export interface AppState {
+export interface TurnVerification {
+    passed: boolean;
+    markdown: string;
+    testResults?: string;
+}
+
+/**
+ * A single conversation turn: the user's message plus everything the agent did
+ * in response. A new submit APPENDS one of these; it is never cleared by the
+ * next submit. All fields below are owned by THIS turn.
+ */
+export interface Turn {
+    id: string;
+    userMessage: string;
+    mode: 'planning' | 'fast';
+    /** Current phase of this turn (drives the per-turn PEV timeline + composer lock). */
     phase: AgentPhase;
+    /** Plan markdown (authoritative once plan_created arrives; raw — strip at render). */
+    plan: string;
+    /** Live assistant prose for execute/verify phases (raw — strip markers at render). */
+    streamingContent: string;
+    /** Tool / todo / LSP progress lane. */
+    activities: ToolActivity[];
+    /** Diffs proposed in this turn, pending review. */
+    patches: FilePatchPayload[];
+    /** Paths the user accepted. */
+    appliedPatches: string[];
+    /** Paths the user rejected. */
+    rejectedPatches: string[];
+    /** Verification result for this turn. */
+    verification: TurnVerification | null;
+    /** Final answer text, set on `done` (raw — strip at render). */
+    answer: string;
+    /** SINGLE error surface for this turn (no more triple-render). */
+    error: string | null;
+    createdAt: string;
+}
+
+// ── AppState ──────────────────────────────────────────────────────────────────
+
+export interface AppState {
     daemonStatus: 'unknown' | 'running' | 'error';
     workDir: string;
     fileTree: FileEntry[];
     openFilePath: string;
     openFileContent: string;
-    chatMessages: ChatMessage[];
-    planMarkdown: string;
-    patches: FilePatchPayload[];
-    appliedPatches: string[];
-    verificationResult: { passed: boolean; markdown: string; testResults?: string } | null;
-    logs: LogPayload[];
-    error: ErrorPayload | null;
-    currentTask: string;
-    streamingContent: string;
-    circuitBreakActive: boolean;
-    lastError: string | null;
+    /** The conversation: an ordered list of turns. The last turn is "active". */
+    turns: Turn[];
+    /** Which turn's diffs are open in the center editor panel (Monaco review). */
+    reviewTurnId: string | null;
+    /** Flat history of submitted task strings (for future composer recall). */
     taskHistory: string[];
 }
 
@@ -116,22 +161,32 @@ export interface AppState {
 export type DaemonStatus = AppState['daemonStatus'];
 
 export const INITIAL_STATE: AppState = {
-    phase: 'idle',
     daemonStatus: 'unknown',
     workDir: '',
     fileTree: [],
     openFilePath: '',
     openFileContent: '',
-    chatMessages: [],
-    planMarkdown: '',
-    patches: [],
-    appliedPatches: [],
-    verificationResult: null,
-    logs: [],
-    error: null,
-    currentTask: '',
-    streamingContent: '',
-    circuitBreakActive: false,
-    lastError: null,
+    turns: [],
+    reviewTurnId: null,
     taskHistory: [],
 };
+
+/** A fresh turn for a newly-submitted task. */
+export function createTurn(userMessage: string, mode: 'planning' | 'fast'): Turn {
+    return {
+        id: crypto.randomUUID(),
+        userMessage,
+        mode,
+        phase: 'thinking',
+        plan: '',
+        streamingContent: '',
+        activities: [],
+        patches: [],
+        appliedPatches: [],
+        rejectedPatches: [],
+        verification: null,
+        answer: '',
+        error: null,
+        createdAt: new Date().toISOString(),
+    };
+}

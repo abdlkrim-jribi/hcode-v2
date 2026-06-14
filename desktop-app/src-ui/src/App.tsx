@@ -1,18 +1,20 @@
 /**
  * App.tsx — HCode v2 desktop shell.
  *
- * v2 additions vs v1:
- *  - onDaemonMessage handles C2 streaming events:
- *      streaming_chunk, planning_started, execution_started,
- *      verification_started, plan_created  (all emitted by bridge.py)
- *  - SkillsPanel / WorkflowsPanel / MCPPanel now call ipc bridge methods
- *    (list_skills, list_workflows, run_workflow, list_mcp_servers,
- *     connect/disconnect_mcp_server) — mocked by default (VITE_MOCK=true).
+ * v3 (agent-chat rebuild):
+ *  - The agent surface is now a CONVERSATION of turns[] (see types.ts / AgentPanel).
+ *    handleSubmitTask APPENDS a turn; nothing is wiped on submit or done.
+ *  - Daemon events route to the active (last) turn via applyAgentMessage — the
+ *    full bridge vocabulary (planning/execution/verification_started,
+ *    streaming_chunk, plan_created, task_update incl. the lsp_verify lane,
+ *    file_patch, verification, error, done).
+ *  - The daemon-message listener effect is StrictMode-safe (no double-register).
+ *  - Errors are a single per-turn surface; phase 'error' re-enables the composer.
  */
 import React, { useReducer, useEffect, useCallback, useRef, useState, useMemo } from 'react';
-import type { AppState, AgentPhase, HcodeMessage, FileEntry, FilePatchPayload, LogPayload, ChatMessage } from './types';
-import type { AgentEvent } from './types/agent-events';
-import { INITIAL_STATE } from './types';
+import type { AppState, AgentPhase, HcodeMessage, FileEntry, Turn } from './types';
+import { INITIAL_STATE, createTurn } from './types';
+import { applyAgentMessage } from './utils/applyAgentMessage';
 
 import AgentPanel from './components/AgentPanel';
 import StatusBar from './components/StatusBar';
@@ -32,80 +34,77 @@ import * as ipc from './ipc/bridge';
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 type Action =
-  | { type: 'SET_PHASE'; phase: AgentPhase }
   | { type: 'SET_DAEMON_STATUS'; status: AppState['daemonStatus'] }
   | { type: 'SET_WORK_DIR'; dir: string }
   | { type: 'SET_FILE_TREE'; tree: FileEntry[] }
   | { type: 'OPEN_FILE'; path: string; content: string }
-  | { type: 'ADD_CHAT'; msg: ChatMessage }
-  | { type: 'SET_PLAN'; markdown: string }
-  | { type: 'ADD_PATCH'; patch: FilePatchPayload }
-  | { type: 'CLEAR_PATCHES' }
-  | { type: 'SET_VERIFICATION'; payload: AppState['verificationResult'] }
-  | { type: 'ADD_LOG'; log: LogPayload }
-  | { type: 'SET_ERROR'; error: AppState['error'] }
-  | { type: 'RESET' }
-  | { type: 'SET_CURRENT_TASK'; task: string }
-  | { type: 'ACCEPT_PATCH'; path: string }
-  | { type: 'REJECT_PATCH'; path: string }
-  | { type: 'SET_STREAMING'; content: string }
-  | { type: 'APPEND_STREAMING'; content: string }
-  | { type: 'CLEAR_STREAMING' }
-  | { type: 'SET_CIRCUIT_BREAK'; active: boolean; reason?: string }
-  | { type: 'SET_LAST_ERROR'; message: string | null }
-  | { type: 'CLEAR_ERROR' }
-  | { type: 'HANDLE_AGENT_EVENT'; event: AgentEvent };
+  | { type: 'START_TURN'; turn: Turn }
+  | { type: 'AGENT_MSG'; msg: HcodeMessage }
+  | { type: 'PATCH_DECISION'; turnId: string; path: string; accepted: boolean }
+  | { type: 'ROLLBACK_TURN'; turnId: string }
+  | { type: 'SET_REVIEW_TURN'; turnId: string | null }
+  | { type: 'ABORT_ACTIVE' }
+  | { type: 'CLEAR_TURN_ERROR'; turnId: string }
+  | { type: 'CLEAR_CONVERSATION' };
+
+const BUSY_PHASES: AgentPhase[] = ['thinking', 'planning', 'executing', 'verifying'];
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case 'SET_PHASE':         return { ...state, phase: action.phase };
     case 'SET_DAEMON_STATUS': return { ...state, daemonStatus: action.status };
     case 'SET_WORK_DIR':      return { ...state, workDir: action.dir };
     case 'SET_FILE_TREE':     return { ...state, fileTree: action.tree };
     case 'OPEN_FILE':         return { ...state, openFilePath: action.path, openFileContent: action.content };
-    case 'ADD_CHAT':          return { ...state, chatMessages: [...state.chatMessages, action.msg] };
-    case 'SET_PLAN':          return { ...state, planMarkdown: action.markdown };
-    case 'ADD_PATCH':         return { ...state, patches: [...state.patches, action.patch] };
-    case 'CLEAR_PATCHES':     return { ...state, patches: [], appliedPatches: [] };
-    case 'SET_VERIFICATION':  return { ...state, verificationResult: action.payload };
-    case 'ADD_LOG':           return { ...state, logs: [...state.logs.slice(-500), action.log] };
-    case 'SET_ERROR':         return { ...state, error: action.error, phase: 'error' };
-    case 'RESET':             return { ...INITIAL_STATE, workDir: state.workDir, fileTree: state.fileTree, daemonStatus: state.daemonStatus, taskHistory: state.taskHistory };
-    case 'SET_CURRENT_TASK':  return { ...state, currentTask: action.task };
-    case 'ACCEPT_PATCH':      return { ...state, patches: state.patches.filter(p => p.path !== action.path), appliedPatches: [...state.appliedPatches, action.path] };
-    case 'REJECT_PATCH':      return { ...state, patches: state.patches.filter(p => p.path !== action.path) };
-    case 'SET_STREAMING':     return { ...state, streamingContent: action.content };
-    case 'APPEND_STREAMING':  return { ...state, streamingContent: state.streamingContent + action.content };
-    case 'CLEAR_STREAMING':   return { ...state, streamingContent: '' };
-    case 'SET_CIRCUIT_BREAK': return { ...state, circuitBreakActive: action.active, lastError: action.reason || state.lastError, phase: action.active ? 'error' : state.phase };
-    case 'SET_LAST_ERROR':    return { ...state, lastError: action.message };
-    case 'CLEAR_ERROR':       return { ...state, lastError: null, circuitBreakActive: false, phase: state.phase === 'error' ? 'idle' : state.phase };
-    case 'HANDLE_AGENT_EVENT': return handleAgentEvent(state, action.event);
-    default: return state;
-  }
-}
 
-function handleAgentEvent(state: AppState, event: AgentEvent): AppState {
-  switch (event.type) {
-    case 'agent_ready':       return { ...state, daemonStatus: 'running' };
-    case 'task_submitted':    return { ...state, currentTask: event.task, phase: 'thinking', streamingContent: '' };
-    case 'planning_started':  return { ...state, phase: 'planning' };
-    case 'plan_created':      return { ...state, planMarkdown: event.markdown };
-    case 'plan_approved':     return { ...state, phase: 'executing' };
-    case 'execution_started': return { ...state, phase: 'executing' };
-    case 'task_update':       return { ...state, streamingContent: event.markdown };
-    case 'file_patch_proposed': return { ...state, patches: [...state.patches, { path: event.path, diff: event.diff, backup: '', originalContent: event.originalContent, newContent: event.newContent }] };
-    case 'file_patch_accepted': return { ...state, patches: state.patches.filter(p => p.path !== event.path), appliedPatches: [...state.appliedPatches, event.path] };
-    case 'file_patch_rejected': return { ...state, patches: state.patches.filter(p => p.path !== event.path) };
-    case 'verification_started': return { ...state, phase: 'verifying' };
-    case 'verification_completed': return { ...state, verificationResult: { passed: event.passed, markdown: event.markdown, testResults: event.testsRun !== undefined ? `${event.testsPassed}/${event.testsRun} passed` : undefined } };
-    case 'streaming_chunk':   return { ...state, streamingContent: state.streamingContent + event.content };
-    case 'error':             return { ...state, lastError: event.message, phase: 'error' };
-    case 'circuit_break':     return { ...state, circuitBreakActive: true, lastError: event.reason, phase: 'error' };
-    case 'loop_detected':     return { ...state, lastError: event.message };
-    case 'daemon_health':     return { ...state, daemonStatus: event.status === 'down' ? 'error' : 'running' };
-    case 'done':              return { ...state, phase: 'done' };
-    default:                  return state;
+    case 'START_TURN':
+      return { ...state, turns: [...state.turns, action.turn], taskHistory: [...state.taskHistory, action.turn.userMessage] };
+
+    case 'AGENT_MSG': {
+      // Every agent event applies to the active (last) turn.
+      if (state.turns.length === 0) return state;
+      const i = state.turns.length - 1;
+      const updated = applyAgentMessage(state.turns[i], action.msg);
+      if (updated === state.turns[i]) return state;
+      const turns = state.turns.slice();
+      turns[i] = updated;
+      return { ...state, turns };
+    }
+
+    case 'PATCH_DECISION':
+      return { ...state, turns: state.turns.map(t => t.id !== action.turnId ? t : {
+        ...t,
+        patches: t.patches.filter(p => p.path !== action.path),
+        appliedPatches: action.accepted ? [...t.appliedPatches, action.path] : t.appliedPatches,
+        rejectedPatches: action.accepted ? t.rejectedPatches : [...t.rejectedPatches, action.path],
+      }) };
+
+    case 'ROLLBACK_TURN':
+      return { ...state, turns: state.turns.map(t => t.id !== action.turnId ? t : {
+        ...t,
+        rejectedPatches: [...t.rejectedPatches, ...t.patches.map(p => p.path)],
+        patches: [],
+      }) };
+
+    case 'SET_REVIEW_TURN': return { ...state, reviewTurnId: action.turnId };
+
+    case 'ABORT_ACTIVE': {
+      if (state.turns.length === 0) return state;
+      const i = state.turns.length - 1;
+      const last = state.turns[i];
+      if (last.phase === 'done' || last.phase === 'error') return state;
+      const turns = state.turns.slice();
+      turns[i] = { ...last, phase: 'done', answer: last.answer || '_(aborted)_' };
+      return { ...state, turns };
+    }
+
+    case 'CLEAR_TURN_ERROR':
+      return { ...state, turns: state.turns.map(t => t.id !== action.turnId ? t : {
+        ...t, error: null, phase: t.phase === 'error' ? 'done' : t.phase,
+      }) };
+
+    case 'CLEAR_CONVERSATION': return { ...state, turns: [], reviewTurnId: null };
+
+    default: return state;
   }
 }
 
@@ -117,7 +116,7 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
 
   const [explorerWidth, setExplorerWidth]           = useState(220);
-  const [agentWidth, setAgentWidth]                 = useState(360);
+  const [agentWidth, setAgentWidth]                 = useState(400);
   const [focus, setFocus]                           = useState<PanelFocus>('editor');
   const [showSettings, setShowSettings]             = useState(false);
   const [explorerCollapsed, setExplorerCollapsed]   = useState(false);
@@ -126,9 +125,11 @@ export default function App() {
   const [showDiffReview, setShowDiffReview]         = useState(false);
   const [capabilityPanel, setCapabilityPanel]       = useState<null | 'mcp' | 'skills' | 'workflows'>(null);
 
-  // Active skill selected from the Skills panel.
-  // Shown as a chip in AgentPanel; its name is appended to submitted tasks.
+  // Active skill selected from the Skills panel; the composer appends its name.
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
+  // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
+  // they are app-level, not part of any agent turn.
+  const [fsError, setFsError] = useState<string | null>(null);
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('hcode-theme') as 'dark' | 'light') || 'dark'
@@ -148,85 +149,39 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ target: 'explorer' | 'agent' | null; startX: number; startWidth: number }>({ target: null, startX: 0, startWidth: 0 });
 
-  // ── Daemon event listener ─────────────────────────────────────────────────
+  // ── Derived conversation state ────────────────────────────────────────────
+  const activeTurn = state.turns.length ? state.turns[state.turns.length - 1] : null;
+  const phase: AgentPhase = activeTurn ? activeTurn.phase : 'idle';
+  const isBusy = activeTurn ? BUSY_PHASES.includes(activeTurn.phase) : false;
+  const reviewTurn = state.reviewTurnId ? state.turns.find(t => t.id === state.reviewTurnId) ?? null : null;
+  const pendingPatchCount = useMemo(() => state.turns.reduce((n, t) => n + t.patches.length, 0), [state.turns]);
 
+  // ── Daemon event listener (StrictMode-safe: no double-register) ───────────
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    const offs: Array<() => void> = [];
+    // If cleanup runs before a listen() promise resolves (StrictMode mounts the
+    // effect twice), unlisten the moment it resolves so we never leak a second
+    // listener — that double-registration was a root cause of duplicated events.
+    const track = (p: Promise<() => void>) => {
+      p.then(off => { if (cancelled) off(); else offs.push(off); }).catch(() => {});
+    };
 
-    ipc.onDaemonMessage((msg: HcodeMessage) => {
-      switch (msg.type) {
-        // ── v1 legacy events ───────────────────────────────────────────────
-        case 'agent_phase':
-          dispatch({ type: 'SET_PHASE', phase: msg.phase });
-          dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'agent_phase', phase: msg.phase, content: `Phase: ${msg.phase}`, timestamp: new Date().toLocaleTimeString() } });
-          break;
-        case 'plan':
-          dispatch({ type: 'SET_PLAN', markdown: msg.payload.markdown });
-          break;
-        case 'file_patch':
-          dispatch({ type: 'ADD_PATCH', patch: msg.payload });
-          break;
-        case 'verification':
-          dispatch({ type: 'SET_VERIFICATION', payload: msg.payload });
-          break;
-        case 'task_update':
-          dispatch({ type: 'SET_STREAMING', content: msg.payload.markdown });
-          break;
-        case 'log':
-          dispatch({ type: 'ADD_LOG', log: msg.payload });
-          break;
-        case 'error':
-          dispatch({ type: 'SET_ERROR', error: msg.payload });
-          dispatch({ type: 'SET_LAST_ERROR', message: msg.payload.message });
-          dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'system', content: `Error: ${msg.payload.message}`, timestamp: new Date().toLocaleTimeString() } });
-          break;
-        case 'circuit_break':
-          dispatch({ type: 'SET_CIRCUIT_BREAK', active: true, reason: msg.payload.reason });
-          break;
-        case 'ready':
-          dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' });
-          break;
-        case 'done':
-          dispatch({ type: 'SET_PHASE', phase: 'done' });
-          dispatch({ type: 'CLEAR_STREAMING' });
-          break;
-        // ── C2 streaming events (emitted by bridge.py / mock daemon) ──────
-        case 'streaming_chunk':
-          dispatch({ type: 'APPEND_STREAMING', content: msg.payload.content });
-          break;
-        case 'planning_started':
-          dispatch({ type: 'SET_PHASE', phase: 'planning' });
-          dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'agent_phase', phase: 'planning', content: 'Phase: planning', timestamp: new Date().toLocaleTimeString() } });
-          break;
-        case 'execution_started':
-          dispatch({ type: 'SET_PHASE', phase: 'executing' });
-          dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'agent_phase', phase: 'executing', content: 'Phase: executing', timestamp: new Date().toLocaleTimeString() } });
-          break;
-        case 'verification_started':
-          dispatch({ type: 'SET_PHASE', phase: 'verifying' });
-          dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'agent_phase', phase: 'verifying', content: 'Phase: verifying', timestamp: new Date().toLocaleTimeString() } });
-          break;
-        case 'plan_created':
-          dispatch({ type: 'SET_PLAN', markdown: msg.payload.markdown });
-          break;
-      }
-    }).then(fn => { unlisten = fn; });
+    const handleMessage = (msg: HcodeMessage) => {
+      if (msg.type === 'ready') { dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' }); return; }
+      dispatch({ type: 'AGENT_MSG', msg });
+    };
 
-    ipc.onDaemonStatus(info => {
-      dispatch({ type: 'SET_DAEMON_STATUS', status: info.status });
-    });
+    track(ipc.onDaemonMessage(handleMessage));
+    track(ipc.onDaemonStatus(info => dispatch({ type: 'SET_DAEMON_STATUS', status: info.status })));
+    ipc.startDaemon()
+      .then(info => dispatch({ type: 'SET_DAEMON_STATUS', status: info.status }))
+      .catch(() => dispatch({ type: 'SET_DAEMON_STATUS', status: 'error' }));
 
-    ipc.startDaemon().then(info => {
-      dispatch({ type: 'SET_DAEMON_STATUS', status: info.status });
-    }).catch(() => {
-      dispatch({ type: 'SET_DAEMON_STATUS', status: 'error' });
-    });
-
-    return () => { unlisten?.(); };
+    return () => { cancelled = true; offs.forEach(off => off()); };
   }, []);
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
-
   const selectFolderRef = useRef<() => void>(() => {});
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -256,18 +211,19 @@ export default function App() {
     try {
       const dir = await ipc.openFolder();
       if (!dir) return; // user cancelled
+      setFsError(null);
       dispatch({ type: 'SET_WORK_DIR', dir });
       dispatch({ type: 'SET_FILE_TREE', tree: [] }); // clear stale tree immediately
       try {
         const tree = await ipc.listDirectory(dir);
         dispatch({ type: 'SET_FILE_TREE', tree });
       } catch (fsErr) {
-        dispatch({ type: 'SET_LAST_ERROR', message: `Cannot read folder: ${fsErr instanceof Error ? fsErr.message : String(fsErr)}` });
+        setFsError(`Cannot read folder: ${fsErr instanceof Error ? fsErr.message : String(fsErr)}`);
         dispatch({ type: 'SET_FILE_TREE', tree: [] });
       }
       setExplorerCollapsed(false);
     } catch (err) {
-      dispatch({ type: 'SET_LAST_ERROR', message: `Open folder failed: ${err instanceof Error ? err.message : String(err)}` });
+      setFsError(`Open folder failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, []);
   selectFolderRef.current = handleSelectFolder;
@@ -287,63 +243,68 @@ export default function App() {
       dispatch({ type: 'OPEN_FILE', path, content });
       setFocus('editor');
     } catch (err) {
-      dispatch({ type: 'SET_LAST_ERROR', message: `Cannot read file: ${err instanceof Error ? err.message : String(err)}` });
+      setFsError(`Cannot read file: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, []);
 
   const handleSubmitTask = useCallback(async (task: string, mode: 'planning' | 'fast') => {
-    dispatch({ type: 'CLEAR_PATCHES' });
-    dispatch({ type: 'SET_PLAN', markdown: '' });
-    dispatch({ type: 'SET_VERIFICATION', payload: null });
-    dispatch({ type: 'CLEAR_STREAMING' });
-    dispatch({ type: 'SET_LAST_ERROR', message: null });
-    dispatch({ type: 'SET_CIRCUIT_BREAK', active: false });
-    dispatch({ type: 'SET_PHASE', phase: 'thinking' });
-    dispatch({ type: 'SET_CURRENT_TASK', task });
-    dispatch({ type: 'ADD_CHAT', msg: { id: crypto.randomUUID(), type: 'user', content: task, timestamp: new Date().toLocaleTimeString() } });
+    const turn = createTurn(task, mode);
+    dispatch({ type: 'START_TURN', turn });   // APPEND — prior turns stay
     setShowDiffReview(false);
-    try { await ipc.runTask(task, mode, false); }
-    catch (err) { dispatch({ type: 'SET_LAST_ERROR', message: err instanceof Error ? err.message : 'Failed to submit task' }); }
     setFocus('agent');
+    try {
+      await ipc.runTask(task, mode, false);
+    } catch (err) {
+      // Surface a submit failure as the turn's single error (no chat-line spam).
+      dispatch({ type: 'AGENT_MSG', msg: { type: 'error', payload: { message: err instanceof Error ? err.message : 'Failed to submit task', suggestion: '' } } });
+    }
   }, []);
 
-  const handleApprovePlan = useCallback(async () => { dispatch({ type: 'SET_PHASE', phase: 'executing' }); await ipc.approvePlan(); }, []);
-  const handleRejectPlan  = useCallback(async () => { dispatch({ type: 'SET_PHASE', phase: 'idle' }); await ipc.rejectPlan('User rejected plan'); }, []);
+  const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
+    try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
+    catch { /* mock no-op / best-effort */ }
+    dispatch({ type: 'PATCH_DECISION', turnId, path, accepted });
+  }, []);
 
-  const handleFileDecision = useCallback(async (path: string, accepted: boolean) => {
-    try {
-      if (accepted) { await ipc.acceptPatch(path); dispatch({ type: 'ACCEPT_PATCH', path }); }
-      else          { await ipc.rejectPatch(path); dispatch({ type: 'REJECT_PATCH', path }); }
-    } catch (err) { dispatch({ type: 'SET_LAST_ERROR', message: `Patch failed: ${err instanceof Error ? err.message : String(err)}` }); }
+  const handleReviewDiffs = useCallback((turnId: string) => {
+    dispatch({ type: 'SET_REVIEW_TURN', turnId });
+    setShowDiffReview(true);
+    setFocus('editor');
   }, []);
 
   const handleRollback = useCallback(async () => {
-    try { await ipc.rollbackAll(); dispatch({ type: 'CLEAR_PATCHES' }); setShowDiffReview(false); }
-    catch (err) { dispatch({ type: 'SET_LAST_ERROR', message: `Rollback failed: ${err instanceof Error ? err.message : String(err)}` }); }
-  }, []);
+    try { await ipc.rollbackAll(); } catch { /* best-effort */ }
+    if (state.reviewTurnId) dispatch({ type: 'ROLLBACK_TURN', turnId: state.reviewTurnId });
+    setShowDiffReview(false);
+    dispatch({ type: 'SET_REVIEW_TURN', turnId: null });
+  }, [state.reviewTurnId]);
 
-  const handleReviewDiffs = useCallback(() => { setShowDiffReview(true); setFocus('editor'); }, []);
+  const handleAbort = useCallback(async () => {
+    try { await ipc.abortTask(); } catch { /* best-effort */ }
+    dispatch({ type: 'ABORT_ACTIVE' });
+  }, []);
 
   // ── Command registry ──────────────────────────────────────────────────────
 
   const commands: Command[] = useMemo(() => [
-    { id: 'open-folder',     label: 'Open Folder',          category: 'File',         shortcut: 'Ctrl+O', action: handleSelectFolder },
-    { id: 'toggle-explorer', label: 'Toggle Explorer',      category: 'View',         shortcut: 'Ctrl+B', action: () => setExplorerCollapsed(p => !p) },
-    { id: 'toggle-agent',    label: 'Toggle Agent Panel',   category: 'View',         shortcut: 'Ctrl+J', action: () => setAgentCollapsed(p => !p) },
-    { id: 'open-settings',   label: 'Open Settings',        category: 'Preferences',  shortcut: 'Ctrl+,', action: () => setShowSettings(true) },
-    { id: 'new-task',        label: 'New Task',             category: 'Agent',        shortcut: 'Ctrl+K', action: () => { setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'toggle-theme',    label: 'Toggle Theme',         category: 'Preferences',  action: () => setTheme(t => t === 'dark' ? 'light' : 'dark') },
-    { id: 'focus-explorer',  label: 'Focus Explorer',       category: 'View',         shortcut: 'Ctrl+1', action: () => { setFocus('explorer'); setExplorerCollapsed(false); } },
-    { id: 'focus-editor',    label: 'Focus Editor',         category: 'View',         shortcut: 'Ctrl+2', action: () => setFocus('editor') },
-    { id: 'focus-agent',     label: 'Focus Agent',          category: 'View',         shortcut: 'Ctrl+3', action: () => { setFocus('agent'); setAgentCollapsed(false); } },
-    { id: 'review-diffs',    label: 'Review Pending Diffs', category: 'Agent',        action: handleReviewDiffs },
-    { id: 'open-mcp',        label: 'Show MCP Servers',     category: 'Capabilities', action: () => { setCapabilityPanel('mcp'); setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'open-skills',     label: 'Show Skills',          category: 'Capabilities', action: () => { setCapabilityPanel('skills'); setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'open-workflows',  label: 'Show Workflows',       category: 'Capabilities', action: () => { setCapabilityPanel('workflows'); setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'open-agent-stream', label: 'Show Agent Stream',  category: 'Capabilities', action: () => { setCapabilityPanel(null); setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'abort-task',      label: 'Abort Current Task',   category: 'Agent',        action: async () => { await ipc.abortTask(); dispatch({ type: 'CLEAR_ERROR' }); dispatch({ type: 'SET_PHASE', phase: 'idle' }); dispatch({ type: 'CLEAR_STREAMING' }); } },
-    { id: 'clear-errors',    label: 'Clear Errors',         category: 'Agent',        action: () => dispatch({ type: 'CLEAR_ERROR' }) },
-  ], [handleSelectFolder, handleReviewDiffs]);
+    { id: 'open-folder',       label: 'Open Folder',          category: 'File',         shortcut: 'Ctrl+O', action: handleSelectFolder },
+    { id: 'toggle-explorer',   label: 'Toggle Explorer',      category: 'View',         shortcut: 'Ctrl+B', action: () => setExplorerCollapsed(p => !p) },
+    { id: 'toggle-agent',      label: 'Toggle Agent Panel',   category: 'View',         shortcut: 'Ctrl+J', action: () => setAgentCollapsed(p => !p) },
+    { id: 'open-settings',     label: 'Open Settings',        category: 'Preferences',  shortcut: 'Ctrl+,', action: () => setShowSettings(true) },
+    { id: 'new-task',          label: 'New Task',             category: 'Agent',        shortcut: 'Ctrl+K', action: () => { setAgentCollapsed(false); setFocus('agent'); } },
+    { id: 'new-conversation',  label: 'New Conversation',     category: 'Agent',        action: () => dispatch({ type: 'CLEAR_CONVERSATION' }) },
+    { id: 'toggle-theme',      label: 'Toggle Theme',         category: 'Preferences',  action: () => setTheme(t => t === 'dark' ? 'light' : 'dark') },
+    { id: 'focus-explorer',    label: 'Focus Explorer',       category: 'View',         shortcut: 'Ctrl+1', action: () => { setFocus('explorer'); setExplorerCollapsed(false); } },
+    { id: 'focus-editor',      label: 'Focus Editor',         category: 'View',         shortcut: 'Ctrl+2', action: () => setFocus('editor') },
+    { id: 'focus-agent',       label: 'Focus Agent',          category: 'View',         shortcut: 'Ctrl+3', action: () => { setFocus('agent'); setAgentCollapsed(false); } },
+    { id: 'review-diffs',      label: 'Review Pending Diffs', category: 'Agent',        action: () => { const t = [...state.turns].reverse().find(t => t.patches.length > 0); if (t) handleReviewDiffs(t.id); } },
+    { id: 'open-mcp',          label: 'Show MCP Servers',     category: 'Capabilities', action: () => { setCapabilityPanel('mcp'); setAgentCollapsed(false); setFocus('agent'); } },
+    { id: 'open-skills',       label: 'Show Skills',          category: 'Capabilities', action: () => { setCapabilityPanel('skills'); setAgentCollapsed(false); setFocus('agent'); } },
+    { id: 'open-workflows',    label: 'Show Workflows',       category: 'Capabilities', action: () => { setCapabilityPanel('workflows'); setAgentCollapsed(false); setFocus('agent'); } },
+    { id: 'open-agent-stream', label: 'Show Conversation',    category: 'Capabilities', action: () => { setCapabilityPanel(null); setAgentCollapsed(false); setFocus('agent'); } },
+    { id: 'abort-task',        label: 'Abort Current Task',   category: 'Agent',        action: handleAbort },
+    { id: 'clear-errors',      label: 'Clear Error',          category: 'Agent',        action: () => { if (activeTurn?.error) dispatch({ type: 'CLEAR_TURN_ERROR', turnId: activeTurn.id }); } },
+  ], [handleSelectFolder, handleReviewDiffs, handleAbort, state.turns, activeTurn]);
 
   // ── Drag logic ────────────────────────────────────────────────────────────
 
@@ -360,7 +321,7 @@ export default function App() {
     if (!s.target) return;
     const delta = e.clientX - s.startX;
     if (s.target === 'explorer') setExplorerWidth(Math.max(160, Math.min(480, s.startWidth + delta)));
-    else setAgentWidth(Math.max(280, Math.min(600, s.startWidth - delta)));
+    else setAgentWidth(Math.max(300, Math.min(720, s.startWidth - delta)));
   };
 
   const onDragEnd = () => {
@@ -383,6 +344,17 @@ export default function App() {
         {state.workDir && <span className="hcode-titlebar__path" title={state.workDir}>{state.workDir}</span>}
       </div>
 
+      {fsError && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-2)',
+          padding: 'var(--space-1) var(--space-3)', background: 'hsla(0, 65%, 52%, 0.10)',
+          borderBottom: '1px solid var(--semantic-error)', color: 'var(--semantic-error)', fontSize: 'var(--text-xs)',
+        }}>
+          <span>⚠ {fsError}</span>
+          <button onClick={() => setFsError(null)} title="Dismiss" style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}>✕</button>
+        </div>
+      )}
+
       <div className="hcode-main">
         {/* Explorer */}
         {!explorerCollapsed ? (
@@ -403,9 +375,9 @@ export default function App() {
 
         {/* Editor */}
         <div className={`hcode-panel hcode-editor-panel ${focus === 'editor' ? 'has-focus' : ''}`} onClickCapture={() => setFocus('editor')}>
-          {showDiffReview && state.patches.length > 0 ? (
+          {showDiffReview && reviewTurn && reviewTurn.patches.length > 0 ? (
             <div style={{ padding: 'var(--space-4)', flex: 1, overflowY: 'auto' }}>
-              <DiffReviewer patches={state.patches} appliedPatches={state.appliedPatches} onFileDecision={handleFileDecision} onRollback={handleRollback} lastError={state.lastError} />
+              <DiffReviewer patches={reviewTurn.patches} appliedPatches={reviewTurn.appliedPatches} onFileDecision={(p, a) => handleFileDecision(reviewTurn.id, p, a)} onRollback={handleRollback} lastError={null} />
             </div>
           ) : state.openFilePath ? (
             <>
@@ -429,7 +401,7 @@ export default function App() {
           )}
         </div>
 
-        {!agentCollapsed && <div className="hcode-resize-handle" onPointerDown={e => onDragStart('agent', e)} onDoubleClick={() => setAgentWidth(360)} />}
+        {!agentCollapsed && <div className="hcode-resize-handle" onPointerDown={e => onDragStart('agent', e)} onDoubleClick={() => setAgentWidth(400)} />}
 
         {agentCollapsed && (
           <div className="hcode-panel-collapsed-strip" onClick={() => setAgentCollapsed(false)} title="Expand Agent (Ctrl+J)" style={{ width: '36px', borderLeft: '1px solid var(--border-default)', background: 'var(--surface-1)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -469,7 +441,7 @@ export default function App() {
                     activeSkill={activeSkill}
                     onSelect={name => {
                       setActiveSkill(name);
-                      setCapabilityPanel(null); // return to agent stream view
+                      setCapabilityPanel(null); // return to conversation view
                       setAgentCollapsed(false);
                       setFocus('agent');
                     }}
@@ -486,15 +458,15 @@ export default function App() {
               </div>
             ) : (
               <AgentPanel
-                appState={state}
+                turns={state.turns}
+                isBusy={isBusy}
                 onSubmitTask={handleSubmitTask}
-                onApprovePlan={handleApprovePlan}
-                onRejectPlan={handleRejectPlan}
+                onReviewDiffs={handleReviewDiffs}
+                onFileDecision={handleFileDecision}
+                onDismissError={(turnId) => dispatch({ type: 'CLEAR_TURN_ERROR', turnId })}
+                onNewConversation={() => dispatch({ type: 'CLEAR_CONVERSATION' })}
                 onSettingsClick={() => setShowSettings(true)}
                 onCollapseClick={() => setAgentCollapsed(true)}
-                onReviewDiffs={handleReviewDiffs}
-                onAbortTask={async () => { await ipc.abortTask(); dispatch({ type: 'CLEAR_ERROR' }); dispatch({ type: 'SET_PHASE', phase: 'idle' }); dispatch({ type: 'CLEAR_STREAMING' }); }}
-                onClearError={() => dispatch({ type: 'CLEAR_ERROR' })}
                 activeSkill={activeSkill}
                 onDismissSkill={() => setActiveSkill(null)}
               />
@@ -503,7 +475,7 @@ export default function App() {
         )}
       </div>
 
-      <StatusBar daemonStatus={state.daemonStatus} phase={state.phase} workDir={state.workDir} pendingPatchCount={state.patches.length} circuitBreakActive={state.circuitBreakActive} currentTask={state.currentTask} />
+      <StatusBar daemonStatus={state.daemonStatus} phase={phase} workDir={state.workDir} pendingPatchCount={pendingPatchCount} circuitBreakActive={activeTurn?.phase === 'error'} currentTask={activeTurn?.userMessage ?? null} />
     </div>
   );
 }
