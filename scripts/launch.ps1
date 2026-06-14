@@ -1,86 +1,135 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    HCode v2 one-click desktop launcher for Windows.
+    HCode v2 one-click desktop launcher for Windows (PowerShell 5.1+).
 
 .DESCRIPTION
-    Auto-detects mock vs live mode by inspecting .env:
-      - If .env exists AND HCODE_MODEL_API_KEY is set to a real value → LIVE mode
-      - Otherwise → MOCK mode (offline demo, no API key needed)
+    Decides MOCK vs LIVE mode from .env, then starts the full stack via
+    scripts/dev.py and opens the browser. Mode decision:
+      1. HCODE_MOCK = 1/true/yes/on   -> MOCK (keyless offline demo)
+      2. HCODE_MOCK = 0/false/no/off  -> LIVE if a real API key is set, else MOCK
+      3. HCODE_MOCK unset             -> LIVE if a real API key is set, else MOCK
+    A key counts as "set" only when it is non-empty, not whitespace, does not
+    start with '#' (a commented/placeholder line), and is not a known placeholder.
 
-    Starts the full stack via scripts/dev.py, waits for the local server,
-    then opens the browser. Keep this window open to see logs; Ctrl+C to stop.
+    ASCII-ONLY ON PURPOSE: PowerShell 5.1 reads a BOM-less script as ANSI, so a
+    non-ASCII character (em dash, box-drawing, arrow) corrupts parsing and the
+    launcher dies with a TerminatorExpectedAtEndOfString error. Do not add
+    non-ASCII characters to this file.
+
+.PARAMETER DryRun
+    Print the resolved mode and exit WITHOUT launching anything.
+
+.PARAMETER EnvPath
+    Path to the .env file to read. Defaults to <repo root>\.env.
 
 .EXAMPLE
-    # Run directly:
     powershell -ExecutionPolicy Bypass -File scripts\launch.ps1
 
-    # Or double-click launch.bat (which calls this script).
+.EXAMPLE
+    # Double-click scripts\launch.bat (which calls this script).
 #>
+
+[CmdletBinding()]
+param(
+    [switch]$DryRun,
+    [string]$EnvPath
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ── Locate repo root (parent of this script's directory) ─────────────────────
+# -- Helpers ------------------------------------------------------------------
+
+function Get-EnvValue {
+    # Return the trimmed value of NAME from .env content, or $null if absent.
+    param([string]$Content, [string]$Name)
+    $pattern = '(?m)^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*)$'
+    $m = [regex]::Match($Content, $pattern)
+    if (-not $m.Success) { return $null }
+    return $m.Groups[1].Value.Trim()
+}
+
+function Test-RealKey {
+    # A value is a real key only if non-empty, not whitespace, not a '#'-comment,
+    # and not a known placeholder.
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    if ($Value.StartsWith('#'))               { return $false }
+    $placeholders = @(
+        'replace-me', 'your-key', 'sk-...', 'CHANGE_ME', 'YOUR_API_KEY',
+        'your-gpt-oss-key', 'paste-your-key-here'
+    )
+    if ($placeholders -contains $Value) { return $false }
+    return $true
+}
+
+# -- Locate repo root (parent of this script's directory) ---------------------
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Split-Path -Parent $ScriptDir
-
 Set-Location $RepoRoot
 
-# ── Banner ────────────────────────────────────────────────────────────────────
+if (-not $EnvPath) { $EnvPath = Join-Path $RepoRoot ".env" }
+
+# -- Banner -------------------------------------------------------------------
+
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║         HCode v2 — Desktop Launcher      ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "        HCode v2 - Desktop Launcher" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Detect live vs mock ───────────────────────────────────────────────────────
-$EnvFile   = Join-Path $RepoRoot ".env"
-$UseMock   = $true
+# -- Decide MOCK vs LIVE ------------------------------------------------------
+
+$UseMock    = $true
 $MockReason = "No .env found"
 
-if (Test-Path $EnvFile) {
-    $EnvContent = Get-Content $EnvFile -Raw
+if (Test-Path $EnvPath) {
+    $EnvContent = Get-Content $EnvPath -Raw
+    if ($null -eq $EnvContent) { $EnvContent = "" }
 
-    # Extract HCODE_MODEL_API_KEY value (ignore commented lines)
-    $ApiKeyMatch = [regex]::Match($EnvContent, '(?m)^\s*HCODE_MODEL_API_KEY\s*=\s*(.+)$')
+    $MockFlag = Get-EnvValue $EnvContent 'HCODE_MOCK'
+    $ApiKey   = Get-EnvValue $EnvContent 'HCODE_MODEL_API_KEY'
+    if (-not (Test-RealKey $ApiKey)) { $ApiKey = Get-EnvValue $EnvContent 'OPENAI_API_KEY' }
+    $HasKey   = Test-RealKey $ApiKey
 
-    if ($ApiKeyMatch.Success) {
-        $ApiKeyValue = $ApiKeyMatch.Groups[1].Value.Trim()
-        # Treat placeholder values as "not configured"
-        $Placeholders = @('replace-me', 'your-key', 'sk-...', '', 'CHANGE_ME', 'YOUR_API_KEY')
-        if ($ApiKeyValue -and $Placeholders -notcontains $ApiKeyValue) {
-            $UseMock   = $false
+    $MockTrue  = @('1', 'true', 'yes', 'on')
+    $MockFalse = @('0', 'false', 'no', 'off')
+    $FlagLower = if ($MockFlag) { $MockFlag.ToLower() } else { '' }
+
+    if ($MockTrue -contains $FlagLower) {
+        # Explicit mock wins, even if a key is present.
+        $UseMock = $true
+        $MockReason = "HCODE_MOCK=$MockFlag"
+    } elseif ($MockFalse -contains $FlagLower) {
+        # Live requested: only go live if a real key backs it.
+        if ($HasKey) {
+            $UseMock = $false
         } else {
-            $MockReason = "HCODE_MODEL_API_KEY is a placeholder ('$ApiKeyValue')"
+            $UseMock = $true
+            $MockReason = "HCODE_MOCK=$MockFlag but no API key is set"
         }
     } else {
-        # Fall back to OPENAI_API_KEY
-        $OAIMatch = [regex]::Match($EnvContent, '(?m)^\s*OPENAI_API_KEY\s*=\s*(.+)$')
-        if ($OAIMatch.Success) {
-            $OAIValue = $OAIMatch.Groups[1].Value.Trim()
-            $Placeholders = @('replace-me', 'your-key', 'sk-...', '', 'CHANGE_ME', 'YOUR_API_KEY')
-            if ($OAIValue -and $Placeholders -notcontains $OAIValue) {
-                $UseMock   = $false
-            } else {
-                $MockReason = "OPENAI_API_KEY is a placeholder"
-            }
+        # HCODE_MOCK unset/blank: infer from the key.
+        if ($HasKey) {
+            $UseMock = $false
         } else {
-            $MockReason = "No API key found in .env"
+            $UseMock = $true
+            $MockReason = "No API key set in .env"
         }
     }
 }
 
-# ── Print mode ────────────────────────────────────────────────────────────────
+# -- Print mode ---------------------------------------------------------------
+
 if ($UseMock) {
-    Write-Host "┌─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
-    Write-Host "│  MOCK MODE — offline demo, no API key needed                │" -ForegroundColor Yellow
-    Write-Host "│                                                             │" -ForegroundColor Yellow
-    Write-Host "│  Running in MOCK mode.                                      │" -ForegroundColor Yellow
-    Write-Host "│  Add your API key to .env and relaunch to go live.          │" -ForegroundColor Yellow
-    Write-Host "│                                                             │" -ForegroundColor Yellow
-    Write-Host "│  Reason: $($MockReason.PadRight(51))│" -ForegroundColor Yellow
-    Write-Host "└─────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host "+-------------------------------------------------------------+" -ForegroundColor Yellow
+    Write-Host "|  MOCK MODE - offline demo, no API key needed                |" -ForegroundColor Yellow
+    Write-Host "|  Set HCODE_MOCK=0 and a real HCODE_MODEL_API_KEY in .env,    |" -ForegroundColor Yellow
+    Write-Host "|  then relaunch to go LIVE.                                   |" -ForegroundColor Yellow
+    Write-Host "+-------------------------------------------------------------+" -ForegroundColor Yellow
+    Write-Host "  Reason: $MockReason" -ForegroundColor Yellow
     Write-Host ""
 } else {
     Write-Host "  Mode: " -NoNewline
@@ -89,7 +138,16 @@ if ($UseMock) {
     Write-Host ""
 }
 
-# ── Check Python / uv ────────────────────────────────────────────────────────
+# -- Dry run: report the decision and exit without launching -------------------
+
+if ($DryRun) {
+    $ModeName = if ($UseMock) { 'MOCK' } else { 'LIVE' }
+    Write-Host "DRYRUN: mode=$ModeName reason=$MockReason"
+    exit 0
+}
+
+# -- Check Python / uv --------------------------------------------------------
+
 $UvCmd = Get-Command "uv" -ErrorAction SilentlyContinue
 $PyCmd = Get-Command "python" -ErrorAction SilentlyContinue
 
@@ -101,10 +159,11 @@ if (-not $UvCmd -and -not $PyCmd) {
     exit 1
 }
 
-# Prefer uv-managed python; fall back to plain python
+# Prefer uv-managed python; fall back to plain python.
 $PythonExe = if ($UvCmd) { "uv" } else { "python" }
 
-# ── Build argument list ───────────────────────────────────────────────────────
+# -- Build argument list ------------------------------------------------------
+
 $DevScript = Join-Path $RepoRoot "scripts\dev.py"
 
 if ($UvCmd) {
@@ -117,7 +176,8 @@ if ($UseMock) {
     $LaunchArgs += "--mock"
 }
 
-# ── Launch ────────────────────────────────────────────────────────────────────
+# -- Launch -------------------------------------------------------------------
+
 Write-Host "  Launching: $PythonExe $($LaunchArgs -join ' ')" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  UI will open at http://localhost:1420 once ready." -ForegroundColor Cyan
@@ -134,7 +194,7 @@ try {
     exit 1
 }
 
-# Keep window open after normal exit so the user can read any final log lines.
+# Keep the window open after a normal exit so final log lines stay visible.
 Write-Host ""
 Write-Host "All processes stopped." -ForegroundColor DarkGray
 Read-Host "Press Enter to close this window"
