@@ -155,6 +155,19 @@ export interface AppState {
     reviewTurnId: string | null;
     /** Flat history of submitted task strings (for future composer recall). */
     taskHistory: string[];
+
+    // ── Sessions (Phase 2) ──────────────────────────────────────────────────
+    /** Active session = the thread_id sent on every run_task (the agent-memory key). */
+    currentSessionId: string;
+    /** Session ids from the daemon (list_sessions). "default" is filtered out in the UI. */
+    sessions: string[];
+    /**
+     * In-run transcripts for non-active sessions, so switching back restores them.
+     * In-memory only: there is NO daemon history API, so selecting a session with no
+     * in-run turns (a prior-run or CLI-created session) opens an empty transcript even
+     * though the agent still remembers it server-side. See PR / report for scope.
+     */
+    archivedTurns: Record<string, Turn[]>;
 }
 
 /** Convenience alias used by StatusBar and other components. */
@@ -169,6 +182,9 @@ export const INITIAL_STATE: AppState = {
     turns: [],
     reviewTurnId: null,
     taskHistory: [],
+    currentSessionId: '',
+    sessions: [],
+    archivedTurns: {},
 };
 
 /** A fresh turn for a newly-submitted task. */

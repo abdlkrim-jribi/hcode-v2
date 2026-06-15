@@ -41,11 +41,34 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     padding: 3px var(--space-2);
-    cursor: not-allowed;
-    opacity: 0.7;
+    cursor: pointer;
     appearance: none;
 }
-.hcode-chatselect:disabled { color: var(--fg-tertiary); }
+.hcode-chatselect:hover:not(:disabled) { border-color: var(--accent); color: var(--fg-primary); }
+.hcode-chatselect:disabled { color: var(--fg-tertiary); cursor: not-allowed; opacity: 0.7; }
+
+/* Non-destructive notice bar (e.g. single-flight "a task is already running"). */
+.hcode-agent-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    background: var(--phase-executing-soft);
+    border-bottom: 1px solid var(--semantic-warning);
+    color: var(--semantic-warning);
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+}
+.hcode-agent-notice__x {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: var(--text-xs);
+    line-height: 1;
+    padding: 0 2px;
+}
 
 /* ── Conversation scroll region ─────────────────────────────────────────────── */
 

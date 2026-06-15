@@ -148,6 +148,10 @@ const MOCK_MCP_SERVERS = [
     { id: 'brave',      name: 'brave',      description: 'Web search',          status: 'disconnected', toolCount: 1 },
 ];
 
+// Mock session list. "default" is included so the UI's filter (which hides the
+// CLI's single-shot default.db) is demoable keyless, like the real daemon returns.
+const MOCK_SESSIONS: string[] = ['default', 'gui_demo_1', 'gui_demo_2'];
+
 // Mock workspace shown when Open Folder is used in pure-mock (VITE_MOCK) mode,
 // so the file tree never hangs on "Loading files..." (mock used to return []).
 const MOCK_ROOT_TREE: FileEntry[] = [
@@ -276,11 +280,20 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'get_api_key':       return null;
         case 'list_skills':       return { skills: MOCK_SKILLS };
         case 'list_workflows':    return { workflows: MOCK_WORKFLOWS };
+        case 'list_sessions':     return { sessions: MOCK_SESSIONS };
         case 'list_mcp_servers':  return { servers: MOCK_MCP_SERVERS };
         case 'connect_mcp_server':    return { status: 'connected',    server: args?.server ?? '' };
         case 'disconnect_mcp_server': return { status: 'disconnected', server: args?.server ?? '' };
         case 'run_workflow': { _fireMock(`run workflow ${args?.workflow ?? 'workflow'}`); return undefined; }
-        case 'run_task':     { _fireMock((args?.task as string) || 'task', (args?.mode as 'planning' | 'fast') || 'planning'); return undefined; }
+        case 'run_task': {
+            const task = (args?.task as string) || 'task';
+            // Simulate the daemon's single-flight guard for the keyless demo:
+            // a task containing "busy" rejects exactly as a 2nd concurrent run_task would.
+            if (/\bbusy\b/i.test(task)) throw new Error('A task is already running');
+            console.info('[Mock IPC] run_task thread_id =', args?.thread_id ?? '(none)');
+            _fireMock(task, (args?.mode as 'planning' | 'fast') || 'planning');
+            return undefined;
+        }
         case 'abort_task':        if (_mockCancel) { _mockCancel(); _mockCancel = null; } return undefined;
         case 'approve_plan': case 'reject_plan':
         case 'accept_patch': case 'reject_patch': case 'rollback_all': return undefined;
@@ -313,8 +326,10 @@ export async function getDaemonHealth(): Promise<DaemonInfo> {
 
 // ── Task commands ─────────────────────────────────────────────────────────────
 
-export async function runTask(task: string, mode: 'planning' | 'fast', autonomous: boolean): Promise<void> {
-    return (await getInvoke())('run_task', { task, mode, autonomous }) as Promise<void>;
+export async function runTask(task: string, mode: 'planning' | 'fast', autonomous: boolean, threadId?: string): Promise<void> {
+    const params: Record<string, unknown> = { task, mode, autonomous };
+    if (threadId) params.thread_id = threadId;   // daemon resumes/creates this session (persist=True)
+    return (await getInvoke())('run_task', params) as Promise<void>;
 }
 export async function abortTask(): Promise<void> {
     return (await getInvoke())('abort_task') as Promise<void>;
@@ -344,6 +359,11 @@ export async function listSkills() {
 export async function listWorkflows() {
     const res = await (await getInvoke())('list_workflows') as { workflows: unknown[] };
     return (res?.workflows ?? []) as Array<{ name: string; description: string; stepCount: number; lastRun: string | null; status: string }>;
+}
+/** Session ids from the daemon (sorted .db stems, [] if none). The UI filters out "default". */
+export async function listSessions(): Promise<string[]> {
+    const res = await (await getInvoke())('list_sessions') as { sessions?: unknown[] };
+    return (res?.sessions ?? []) as string[];
 }
 export async function runWorkflow(workflow: string): Promise<void> {
     return (await getInvoke())('run_workflow', { workflow }) as Promise<void>;
