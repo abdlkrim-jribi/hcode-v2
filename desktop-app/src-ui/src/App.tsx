@@ -45,6 +45,10 @@ type Action =
   | { type: 'SET_REVIEW_TURN'; turnId: string | null }
   | { type: 'ABORT_ACTIVE' }
   | { type: 'CLEAR_TURN_ERROR'; turnId: string }
+  | { type: 'REMOVE_TURN'; id: string }
+  | { type: 'SET_SESSIONS'; sessions: string[] }
+  | { type: 'NEW_SESSION'; id: string }
+  | { type: 'SWITCH_SESSION'; id: string }
   | { type: 'CLEAR_CONVERSATION' };
 
 const BUSY_PHASES: AgentPhase[] = ['thinking', 'planning', 'executing', 'verifying'];
@@ -102,6 +106,30 @@ function reducer(state: AppState, action: Action): AppState {
         ...t, error: null, phase: t.phase === 'error' ? 'done' : t.phase,
       }) };
 
+    case 'REMOVE_TURN':
+      return { ...state, turns: state.turns.filter(t => t.id !== action.id) };
+
+    case 'SET_SESSIONS':
+      return { ...state, sessions: action.sessions };
+
+    case 'NEW_SESSION': {
+      // Archive the current transcript, then start an empty one bound to the new id.
+      const archivedTurns = state.turns.length
+        ? { ...state.archivedTurns, [state.currentSessionId]: state.turns }
+        : state.archivedTurns;
+      return { ...state, archivedTurns, currentSessionId: action.id, turns: [], reviewTurnId: null };
+    }
+
+    case 'SWITCH_SESSION': {
+      if (action.id === state.currentSessionId) return state;
+      // Archive the current turns; restore the target's in-run turns (or empty).
+      const archivedTurns = { ...state.archivedTurns };
+      if (state.turns.length) archivedTurns[state.currentSessionId] = state.turns;
+      const turns = archivedTurns[action.id] ?? [];
+      delete archivedTurns[action.id];   // it is live again, not archived
+      return { ...state, archivedTurns, currentSessionId: action.id, turns, reviewTurnId: null };
+    }
+
     case 'CLEAR_CONVERSATION': return { ...state, turns: [], reviewTurnId: null };
 
     default: return state;
@@ -112,8 +140,18 @@ function reducer(state: AppState, action: Action): AppState {
 
 type PanelFocus = 'explorer' | 'editor' | 'agent' | null;
 
+// Session id persistence — uses the app's existing localStorage convention
+// (same as hcode-theme / hcode-editor-settings), guarded for sandboxed storage.
+const SESSION_KEY = 'hcode-session-id';
+function newSessionId(): string { return `gui_${Date.now().toString(36)}`; }
+function loadSessionId(): string {
+  try { const v = localStorage.getItem(SESSION_KEY); if (v) return v; } catch { /* storage unavailable */ }
+  return newSessionId();
+}
+
 export default function App() {
-  const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  // Lazy init so currentSessionId is restored (or generated) before first render.
+  const [state, dispatch] = useReducer(reducer, INITIAL_STATE, (init) => ({ ...init, currentSessionId: loadSessionId() }));
 
   const [explorerWidth, setExplorerWidth]           = useState(220);
   const [agentWidth, setAgentWidth]                 = useState(400);
@@ -130,6 +168,8 @@ export default function App() {
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
+  // Non-destructive transient notice (e.g. single-flight "a task is already running").
+  const [notice, setNotice] = useState<string | null>(null);
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     (localStorage.getItem('hcode-theme') as 'dark' | 'light') || 'dark'
@@ -141,6 +181,10 @@ export default function App() {
 
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('hcode-theme', theme); }, [theme]);
   useEffect(() => { localStorage.setItem('hcode-editor-settings', JSON.stringify(editorSettings)); }, [editorSettings]);
+  // Persist the active session id; auto-dismiss notices; fetch the session list on mount.
+  useEffect(() => { try { localStorage.setItem(SESSION_KEY, state.currentSessionId); } catch { /* ignore */ } }, [state.currentSessionId]);
+  useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 4500); return () => clearTimeout(t); }, [notice]);
+  useEffect(() => { ipc.listSessions().then(s => dispatch({ type: 'SET_SESSIONS', sessions: s })).catch(() => {}); }, []);
 
   const recentFolders = useMemo(() => {
     try { return JSON.parse(localStorage.getItem('hcode-recent-folders') || '[]'); } catch { return []; }
@@ -155,6 +199,17 @@ export default function App() {
   const isBusy = activeTurn ? BUSY_PHASES.includes(activeTurn.phase) : false;
   const reviewTurn = state.reviewTurnId ? state.turns.find(t => t.id === state.reviewTurnId) ?? null : null;
   const pendingPatchCount = useMemo(() => state.turns.reduce((n, t) => n + t.patches.length, 0), [state.turns]);
+  // Sessions for the dropdown: active first, then any session we have in-run turns
+  // for (so a just-used local session stays selectable even before the daemon list
+  // catches up — and in mock, where list_sessions is static), then the daemon's
+  // list. "default" is hidden. A Set keeps insertion order and de-dupes.
+  const displayedSessions = useMemo(() => {
+    const set = new Set<string>();
+    if (state.currentSessionId) set.add(state.currentSessionId);
+    for (const id of Object.keys(state.archivedTurns)) set.add(id);
+    for (const s of state.sessions) if (s !== 'default') set.add(s);
+    return [...set];
+  }, [state.sessions, state.currentSessionId, state.archivedTurns]);
 
   // ── Daemon event listener (StrictMode-safe: no double-register) ───────────
   useEffect(() => {
@@ -170,6 +225,8 @@ export default function App() {
     const handleMessage = (msg: HcodeMessage) => {
       if (msg.type === 'ready') { dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' }); return; }
       dispatch({ type: 'AGENT_MSG', msg });
+      // A completed task may have just persisted this session's .db — refresh the list.
+      if (msg.type === 'done') ipc.listSessions().then(s => dispatch({ type: 'SET_SESSIONS', sessions: s })).catch(() => {});
     };
 
     track(ipc.onDaemonMessage(handleMessage));
@@ -253,12 +310,22 @@ export default function App() {
     setShowDiffReview(false);
     setFocus('agent');
     try {
-      await ipc.runTask(task, mode, false);
+      // Thread the active session id so the daemon resumes/persists this session
+      // (persist=True + per-session agent cache => the agent remembers prior turns).
+      await ipc.runTask(task, mode, false, state.currentSessionId);
     } catch (err) {
-      // Surface a submit failure as the turn's single error (no chat-line spam).
-      dispatch({ type: 'AGENT_MSG', msg: { type: 'error', payload: { message: err instanceof Error ? err.message : 'Failed to submit task', suggestion: '' } } });
+      const m = err instanceof Error ? err.message : String(err);
+      if (/already running/i.test(m)) {
+        // Single-flight (-32000): NOT a task failure. Drop the empty turn and show a
+        // non-destructive notice; the in-flight turn keeps streaming untouched.
+        dispatch({ type: 'REMOVE_TURN', id: turn.id });
+        setNotice('A task is already running — wait for it to finish.');
+      } else {
+        // A real submit failure surfaces as the turn's single error (no chat-line spam).
+        dispatch({ type: 'AGENT_MSG', msg: { type: 'error', payload: { message: m || 'Failed to submit task', suggestion: '' } } });
+      }
     }
-  }, []);
+  }, [state.currentSessionId]);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
@@ -284,6 +351,17 @@ export default function App() {
     dispatch({ type: 'ABORT_ACTIVE' });
   }, []);
 
+  const handleNewSession = useCallback(() => {
+    dispatch({ type: 'NEW_SESSION', id: newSessionId() });   // archives current, empty transcript
+    setShowDiffReview(false);
+    ipc.listSessions().then(s => dispatch({ type: 'SET_SESSIONS', sessions: s })).catch(() => {});
+  }, []);
+
+  const handleSwitchSession = useCallback((id: string) => {
+    dispatch({ type: 'SWITCH_SESSION', id });
+    setShowDiffReview(false);
+  }, []);
+
   // ── Command registry ──────────────────────────────────────────────────────
 
   const commands: Command[] = useMemo(() => [
@@ -292,7 +370,7 @@ export default function App() {
     { id: 'toggle-agent',      label: 'Toggle Agent Panel',   category: 'View',         shortcut: 'Ctrl+J', action: () => setAgentCollapsed(p => !p) },
     { id: 'open-settings',     label: 'Open Settings',        category: 'Preferences',  shortcut: 'Ctrl+,', action: () => setShowSettings(true) },
     { id: 'new-task',          label: 'New Task',             category: 'Agent',        shortcut: 'Ctrl+K', action: () => { setAgentCollapsed(false); setFocus('agent'); } },
-    { id: 'new-conversation',  label: 'New Conversation',     category: 'Agent',        action: () => dispatch({ type: 'CLEAR_CONVERSATION' }) },
+    { id: 'new-session',       label: 'New Session',          category: 'Agent',        action: handleNewSession },
     { id: 'toggle-theme',      label: 'Toggle Theme',         category: 'Preferences',  action: () => setTheme(t => t === 'dark' ? 'light' : 'dark') },
     { id: 'focus-explorer',    label: 'Focus Explorer',       category: 'View',         shortcut: 'Ctrl+1', action: () => { setFocus('explorer'); setExplorerCollapsed(false); } },
     { id: 'focus-editor',      label: 'Focus Editor',         category: 'View',         shortcut: 'Ctrl+2', action: () => setFocus('editor') },
@@ -304,7 +382,7 @@ export default function App() {
     { id: 'open-agent-stream', label: 'Show Conversation',    category: 'Capabilities', action: () => { setCapabilityPanel(null); setAgentCollapsed(false); setFocus('agent'); } },
     { id: 'abort-task',        label: 'Abort Current Task',   category: 'Agent',        action: handleAbort },
     { id: 'clear-errors',      label: 'Clear Error',          category: 'Agent',        action: () => { if (activeTurn?.error) dispatch({ type: 'CLEAR_TURN_ERROR', turnId: activeTurn.id }); } },
-  ], [handleSelectFolder, handleReviewDiffs, handleAbort, state.turns, activeTurn]);
+  ], [handleSelectFolder, handleReviewDiffs, handleAbort, handleNewSession, state.turns, activeTurn]);
 
   // ── Drag logic ────────────────────────────────────────────────────────────
 
@@ -460,11 +538,16 @@ export default function App() {
               <AgentPanel
                 turns={state.turns}
                 isBusy={isBusy}
+                sessions={displayedSessions}
+                currentSessionId={state.currentSessionId}
+                onSwitchSession={handleSwitchSession}
+                onNewSession={handleNewSession}
+                notice={notice}
+                onDismissNotice={() => setNotice(null)}
                 onSubmitTask={handleSubmitTask}
                 onReviewDiffs={handleReviewDiffs}
                 onFileDecision={handleFileDecision}
                 onDismissError={(turnId) => dispatch({ type: 'CLEAR_TURN_ERROR', turnId })}
-                onNewConversation={() => dispatch({ type: 'CLEAR_CONVERSATION' })}
                 onSettingsClick={() => setShowSettings(true)}
                 onCollapseClick={() => setAgentCollapsed(true)}
                 activeSkill={activeSkill}
