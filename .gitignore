@@ -242,3 +242,12 @@ desktop-app/src-ui/dist/
 desktop-app/src-ui/node_modules/
 .hcode/sessions/
 .hcode/chat_history.txt
+
+# Local manual-test scratch & probes (never commit)
+# Repo-root-only (leading slash) so they don't hide real source deeper in the tree.
+# /temp*.py already covers tempconv*.py and temputils.py, so those are collapsed in.
+/conv.py
+/temp*.py
+probe_verify_out*.txt
+/scripts/probe_*.py
+.hcode/backups/
