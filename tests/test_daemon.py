@@ -121,6 +121,30 @@ def test_list_workflows_finds_md_files(tmp_path: Path):
         proc.wait(timeout=5)
 
 
+# ── list_sessions ─────────────────────────────────────────────────────────────
+
+def test_list_sessions_empty(daemon):
+    _send(daemon, "list_sessions", req_id=8)
+    resp = _read(daemon)
+    assert resp["id"] == 8
+    assert resp["result"]["sessions"] == []
+
+
+def test_list_sessions_finds_dbs(tmp_path: Path):
+    sessions = tmp_path / ".hcode" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "a.db").write_text("")
+    (sessions / "b.db").write_text("")
+    proc = _start_daemon(tmp_path)
+    try:
+        _send(proc, "list_sessions", req_id=80)
+        resp = _read(proc)
+        assert resp["result"]["sessions"] == ["a", "b"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 # ── list_mcp_servers ──────────────────────────────────────────────────────────
 
 def test_list_mcp_servers(daemon):
@@ -194,10 +218,20 @@ def test_run_task_returns_started_then_done(daemon):
 
 
 def test_run_task_custom_thread_id(daemon):
+    # A client-supplied thread_id passes through verbatim (no gui_ prefix added),
+    # so the GUI can resume a named or CLI-created session.
     _send(daemon, "run_task", {"task": "ping", "thread_id": "my-thread"}, req_id=60)
     started = _read(daemon)
     assert started["result"]["thread_id"] == "my-thread"
     _drain_until_done(daemon)  # consume all events including done
+
+
+def test_run_task_auto_thread_id_has_gui_prefix(daemon):
+    # No client thread_id -> daemon auto-generates one namespaced under gui_.
+    _send(daemon, "run_task", {"task": "say hello"}, req_id=61)
+    started = _read(daemon)
+    assert started["result"]["thread_id"].startswith("gui_")
+    _drain_until_done(daemon)
 
 
 # ── run_workflow ──────────────────────────────────────────────────────────────
@@ -212,6 +246,13 @@ def test_run_workflow_returns_started_then_done(daemon):
     events = _drain_until_done(daemon)
     done_evts = [e for e in events if e.get("type") == "done"]
     assert done_evts, f"No done event: {[e.get('type') for e in events]}"
+
+
+def test_run_workflow_auto_thread_id_has_gui_wf_prefix(daemon):
+    _send(daemon, "run_workflow", {"workflow": "build"}, req_id=71)
+    started = _read(daemon)
+    assert started["result"]["thread_id"].startswith("gui_wf_")
+    _drain_until_done(daemon)
 
 
 # ── unknown method ────────────────────────────────────────────────────────────

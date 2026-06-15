@@ -57,6 +57,10 @@ class JsonRpcDaemon:
         self._mcp_config = mcp_config
         self._running = True
         self._current_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        # Per-session agent cache, keyed by thread_id. Mirrors the CLI's
+        # build-once-reuse pattern (cli/main.py:196) so a session keeps its
+        # memory across run_task calls instead of rebuilding every task.
+        self._agents: dict[str, Any] = {}
 
         self._real_stdout = sys.stdout
         sys.stdout = sys.stderr
@@ -90,6 +94,7 @@ class JsonRpcDaemon:
             elif method == "run_workflow":         await self._handle_run_workflow_dispatch(req_id, params)
             elif method == "list_skills":          await self._handle_list_skills(req_id)
             elif method == "list_workflows":       await self._handle_list_workflows(req_id)
+            elif method == "list_sessions":        await self._handle_list_sessions(req_id)
             elif method == "list_mcp_servers":     await self._handle_list_mcp_servers(req_id)
             elif method == "connect_mcp_server":   await self._handle_connect_mcp_server(req_id, params)
             elif method == "disconnect_mcp_server": await self._handle_disconnect_mcp_server(req_id, params)
@@ -117,6 +122,11 @@ class JsonRpcDaemon:
         root = Path(self._workflows_dir)
         workflows = (sorted(p.stem for p in root.glob("*.md")) if root.is_dir() else [])
         self.send_response(req_id, {"workflows": workflows})
+
+    async def _handle_list_sessions(self, req_id: Any) -> None:
+        root = Path(".hcode/sessions")
+        sessions = (sorted(p.stem for p in root.glob("*.db")) if root.is_dir() else [])
+        self.send_response(req_id, {"sessions": sessions})
 
     async def _handle_list_mcp_servers(self, req_id: Any) -> None:
         from deepagents.mcp.client import MCPClientManager
@@ -159,13 +169,19 @@ class JsonRpcDaemon:
     # ── Async task dispatch ───────────────────────────────────────────────────
 
     async def _handle_run_task_dispatch(self, req_id: Any, params: dict) -> None:
+        # Single-flight: refuse a new task while one is still running rather than
+        # overwriting _current_task (which would also open a same-session
+        # concurrent-write path on the session db).
+        if self._current_task is not None and not self._current_task.done():
+            self.send_response(req_id, error={"code": -32000, "message": "A task is already running"})
+            return
         task: str = params.get("task", "")
-        thread_id: str = params.get("thread_id") or f"daemon_{abs(hash(task))}"
+        thread_id: str = params.get("thread_id") or f"gui_{abs(hash(task))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id))
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
         name: str = params.get("workflow", "")
-        thread_id: str = params.get("thread_id") or f"daemon_wf_{abs(hash(name))}"
+        thread_id: str = params.get("thread_id") or f"gui_wf_{abs(hash(name))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, f"run workflow {name}", thread_id))
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
@@ -187,13 +203,20 @@ class JsonRpcDaemon:
         bridge.on_task_start()
 
         try:
-            agent = await create_hcode_agent(
-                skills_dir=self._skills_dir,
-                workflows_dir=self._workflows_dir,
-                mcp_config=self._mcp_config,
-                session_id=thread_id,
-                persist=False,
-            )
+            # Build the agent once per session and reuse it for later tasks on
+            # the same thread_id. persist=True routes state through the SQLite
+            # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
+            # across tasks and are resumable — matching the CLI.
+            agent = self._agents.get(thread_id)
+            if agent is None:
+                agent = await create_hcode_agent(
+                    skills_dir=self._skills_dir,
+                    workflows_dir=self._workflows_dir,
+                    mcp_config=self._mcp_config,
+                    session_id=thread_id,
+                    persist=True,
+                )
+                self._agents[thread_id] = agent
             last_text = ""
             async for event in agent.astream_events(
                 {"messages": [HumanMessage(content=task)]},
