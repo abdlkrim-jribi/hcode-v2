@@ -77,9 +77,13 @@ function ActivityLane({ turn }: { turn: Turn }) {
                     const cls = a.lspStatus === 'errors' ? 'is-error'
                         : a.lspStatus === 'clean' ? 'is-done'
                         : 'is-verifying';
+                    const glyph = a.lspStatus === 'errors' ? '⚠'
+                        : a.lspStatus === 'clean' ? '✓'
+                        : '🔍';
                     return (
-                        <div key={a.id} className="hcode-activity__item">
+                        <div key={a.id} className="hcode-activity__item hcode-activity__item--lsp">
                             <span className={`hcode-phase-dot ${cls}`} />
+                            <span className="hcode-activity__glyph">{glyph}</span>
                             <span>{renderInline(a.label)}</span>
                         </div>
                     );

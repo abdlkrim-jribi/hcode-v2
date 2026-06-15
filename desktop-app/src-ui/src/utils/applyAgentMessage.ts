@@ -103,9 +103,20 @@ export function applyAgentMessage(turn: Turn, msg: HcodeMessage): Turn {
             return { ...turn, activities: [...turn.activities, newActivity({ kind: 'info', label, step })] };
         }
 
-        // ── Diffs (mock extra) ─────────────────────────────────────────────
-        case 'file_patch':
-            return { ...turn, patches: [...turn.patches, msg.payload] };
+        // ── Diffs ──────────────────────────────────────────────────────────
+        // Replace-on-same-path: re-proposing a file (e.g. after an LSP fix)
+        // updates its patch in place instead of appending a duplicate. Without
+        // this, the same path renders twice -> wrong file count + React
+        // duplicate-key errors (DiffCard keys by path).
+        case 'file_patch': {
+            const path = msg.payload.path;
+            return {
+                ...turn,
+                patches: [...turn.patches.filter(p => p.path !== path), msg.payload],
+                appliedPatches: turn.appliedPatches.filter(p => p !== path),
+                rejectedPatches: turn.rejectedPatches.filter(p => p !== path),
+            };
+        }
 
         // ── Verification (mock extra) ──────────────────────────────────────
         case 'verification':
