@@ -475,9 +475,12 @@ def _completions(completer, text: str) -> list[str]:
 
 
 def test_chat_commands_catalog_matches_wired_dispatch() -> None:
-    # The completer must offer exactly what the chat loop dispatches — no
-    # dead entries (e.g. /help comes only when it is wired in C4).
-    assert set(CHAT_COMMANDS) == {"/exit", "/quit", "/skills", "/workflows"}
+    # The completer offers exactly what the chat loop dispatches via
+    # handle_chat_command — these are all wired now.
+    assert set(CHAT_COMMANDS) == {
+        "/help", "/mcp", "/clear", "/todos", "/config",
+        "/skills", "/workflows", "/exit", "/quit",
+    }
 
 
 def test_slash_completer_offers_skills_for_sk_prefix() -> None:
@@ -890,3 +893,218 @@ def test_live_never_raises_on_malformed_events() -> None:
         for event in malformed:
             renderer.process_event(event)
     assert renderer.final_text == ""
+
+
+def test_live_show_todos_flag_controls_checklist() -> None:
+    # /todos threads show_todos into the renderer: False hides the live checklist,
+    # True (the default) shows it.
+    todo_event = {
+        "event": "on_tool_start",
+        "name": "write_todos",
+        "data": {"input": {"todos": [{"content": "do it", "status": "pending"}]}},
+    }
+    hidden_console = RichConsole(record=True, width=100)
+    hidden = LiveTurnRenderer(console=hidden_console, show_todos=False)
+    hidden.process_event(todo_event)
+    assert "do it" not in _render(hidden, hidden_console)
+
+    shown_console = RichConsole(record=True, width=100)
+    shown = LiveTurnRenderer(console=shown_console, show_todos=True)
+    shown.process_event(todo_event)
+    assert "do it" in _render(shown, shown_console)
+
+
+# --- handle_chat_command (chat slash-command dispatch) -----------------------
+#
+# The chat loop dispatches slash commands inside an interactive prompt_toolkit
+# session, awkward to drive in tests. So dispatch is a pure function
+# handle_chat_command(cmd, ctx) -> ChatCommandResult that the loop routes
+# through; we test the function directly. These define the contract.
+#
+# ASSUMED ChatCommandResult shape (attributes):
+#   handled: bool            — True if recognized (loop continues, does NOT send
+#                              the text to the agent); False -> fall through and
+#                              send the raw text to the agent as a normal prompt.
+#   should_exit: bool        — True -> break the chat loop. Default False.
+#   new_session_id: str|None — non-None -> loop rotates the thread id (/clear,
+#                              /reset, giving an empty conversation). Default None.
+#   show_todos: bool|None    — non-None -> the new /todos toggle value. Default
+#                              None (untouched by other commands).
+#
+# ASSUMED ctx (attribute access; a SimpleNamespace suffices):
+#   console          — rich Console to print to
+#   mcp_config_path  — path (str) to the MCP config json for /mcp subcommands
+#   session_id       — current chat session / thread id
+#   show_todos       — current /todos toggle state (bool)
+#   chat_commands    — the CHAT_COMMANDS dict (for completion / help)
+#   config           — a Config (Config.from_env()) for /config
+
+
+def _chat_ctx(tmp_path, *, session_id="sess-1", show_todos=False, mcp_config=None):
+    """Build a chat-command context. ``mcp_config`` (dict) is written to a temp
+    mcp_config.json so /mcp tests never touch the real one."""
+    import json
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from hcode_v2.cli.completion import CHAT_COMMANDS
+    from hcode_v2.utils.config import Config
+
+    mcp_path = tmp_path / "mcp_config.json"
+    if mcp_config is not None:
+        mcp_path.write_text(json.dumps(mcp_config), encoding="utf-8")
+    return SimpleNamespace(
+        console=Console(record=True, width=100),
+        mcp_config_path=str(mcp_path),
+        session_id=session_id,
+        show_todos=show_todos,
+        chat_commands=CHAT_COMMANDS,
+        config=Config.from_env(),
+    )
+
+
+def test_chat_cmd_help_lists_commands(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path)
+    result = handle_chat_command("/help", ctx)
+    assert result.handled is True
+    out = ctx.console.export_text()
+    for token in ("/help", "/mcp", "/clear", "/todos", "/exit"):
+        assert token in out, f"/help missing {token}"
+
+
+def test_chat_cmd_help_aliases(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    for alias in ("/h", "/?"):
+        ctx = _chat_ctx(tmp_path)
+        result = handle_chat_command(alias, ctx)
+        assert result.handled is True, alias
+        out = ctx.console.export_text()
+        assert "/help" in out and "/mcp" in out, alias
+
+
+def test_chat_cmd_exit_family(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    for cmd in ("/exit", "/quit", "/q", "/bye"):
+        ctx = _chat_ctx(tmp_path)
+        result = handle_chat_command(cmd, ctx)
+        assert result.handled is True, cmd
+        assert result.should_exit is True, cmd
+
+
+def test_chat_cmd_clear_rotates_session(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    for cmd in ("/clear", "/reset"):
+        ctx = _chat_ctx(tmp_path, session_id="old-session")
+        result = handle_chat_command(cmd, ctx)
+        assert result.handled is True, cmd
+        assert result.new_session_id is not None, cmd
+        assert result.new_session_id != "old-session", cmd
+
+
+def test_chat_cmd_todos_toggles(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx_off = _chat_ctx(tmp_path, show_todos=False)
+    r_on = handle_chat_command("/todos", ctx_off)
+    assert r_on.handled is True
+    assert r_on.show_todos is True   # off -> on
+
+    ctx_on = _chat_ctx(tmp_path, show_todos=True)
+    r_off = handle_chat_command("/todos", ctx_on)
+    assert r_off.show_todos is False  # on -> off
+
+
+def test_chat_cmd_mcp_list_empty(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    for cmd in ("/mcp", "/mcp list"):
+        ctx = _chat_ctx(tmp_path, mcp_config={"servers": {}})
+        result = handle_chat_command(cmd, ctx)
+        assert result.handled is True, cmd
+        assert "no servers" in ctx.console.export_text().lower(), cmd
+
+
+def test_chat_cmd_mcp_known_lists_presets(tmp_path: Path) -> None:
+    from deepagents.mcp.client import KNOWN_SERVERS
+
+    from hcode_v2.cli.main import handle_chat_command
+
+    # assert against a REAL preset name, not an invented one
+    assert "filesystem" in KNOWN_SERVERS
+    ctx = _chat_ctx(tmp_path)
+    result = handle_chat_command("/mcp known", ctx)
+    assert result.handled is True
+    assert "filesystem" in ctx.console.export_text()
+
+
+def test_chat_cmd_mcp_status(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path, mcp_config={"servers": {}})
+    result = handle_chat_command("/mcp status", ctx)
+    assert result.handled is True
+    assert "configured" in ctx.console.export_text().lower()
+
+
+def test_chat_cmd_mcp_connect_writes_config(tmp_path: Path) -> None:
+    import json
+
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path, mcp_config={"servers": {}})
+    result = handle_chat_command("/mcp connect filesystem", ctx)
+    assert result.handled is True
+    data = json.loads(Path(ctx.mcp_config_path).read_text(encoding="utf-8"))
+    assert "filesystem" in data.get("servers", {})
+
+
+def test_chat_cmd_mcp_add_writes_entry(tmp_path: Path) -> None:
+    import json
+
+    from hcode_v2.cli.main import handle_chat_command
+
+    # mirrors the real `mcp add SERVER_ID --command CMD` signature
+    ctx = _chat_ctx(tmp_path, mcp_config={"servers": {}})
+    result = handle_chat_command("/mcp add myid --command echo", ctx)
+    assert result.handled is True
+    data = json.loads(Path(ctx.mcp_config_path).read_text(encoding="utf-8"))
+    assert "myid" in data.get("servers", {})
+    assert data["servers"]["myid"].get("command") == "echo"
+
+
+def test_chat_cmd_mcp_remove_deletes_entry(tmp_path: Path) -> None:
+    import json
+
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path, mcp_config={"servers": {}})
+    handle_chat_command("/mcp connect filesystem", ctx)   # add it first
+    result = handle_chat_command("/mcp remove filesystem", ctx)
+    assert result.handled is True
+    data = json.loads(Path(ctx.mcp_config_path).read_text(encoding="utf-8"))
+    assert "filesystem" not in data.get("servers", {})
+
+
+def test_chat_cmd_config_shows_model(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_MODEL_NAME", "chat-cfg-model")
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path)  # ctx.config = Config.from_env() picks up the env
+    result = handle_chat_command("/config", ctx)
+    assert result.handled is True
+    assert "chat-cfg-model" in ctx.console.export_text()
+
+
+def test_chat_cmd_unknown_falls_through(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path)
+    result = handle_chat_command("/bogus", ctx)
+    # not handled -> the loop sends the raw text to the agent (today's behavior)
+    assert result.handled is False

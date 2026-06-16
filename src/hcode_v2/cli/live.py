@@ -121,8 +121,9 @@ class LiveTurnRenderer:
         console: Rich console to render to (the chat display's console).
     """
 
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, show_todos: bool = True) -> None:
         self.console = console
+        self.show_todos = show_todos
         self.verify_status: str | None = None
         self._answer_text: str = ""
         self._verdict_text: str = ""
@@ -180,9 +181,10 @@ class LiveTurnRenderer:
     def renderable(self) -> RenderableType:
         """Return the current live region content (checklist + running tool)."""
         lines: list[RenderableType] = []
-        for status, text in self._todos:
-            marker, style = _STATUS_STYLES.get(status, _STATUS_STYLES["pending"])
-            lines.append(Text(f"[{marker}] {text}", style=style))
+        if self.show_todos:
+            for status, text in self._todos:
+                marker, style = _STATUS_STYLES.get(status, _STATUS_STYLES["pending"])
+                lines.append(Text(f"[{marker}] {text}", style=style))
         if self._active_tool:
             lines.append(Text(f"running {self._active_tool}...", style="dim"))
         return Group(*lines) if lines else Text("")
