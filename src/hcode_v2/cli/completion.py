@@ -25,14 +25,18 @@ from prompt_toolkit.history import FileHistory
 
 _DEFAULT_HISTORY_PATH = ".hcode/chat_history.txt"
 
-# Only the commands the chat loop actually dispatches today (see the `chat`
-# command in main.py). New commands must be wired there BEFORE being added
-# here — no dead entries.
+# The commands the chat loop actually dispatches via handle_chat_command
+# (main.py). Keep this in sync with that dispatcher — no dead entries.
 CHAT_COMMANDS: dict[str, str] = {
-    "/exit": "End the session",
-    "/quit": "End the session",
+    "/help": "Show available commands",
+    "/mcp": "Manage MCP servers",
+    "/clear": "Clear the conversation",
+    "/todos": "Toggle the task checklist",
+    "/config": "Show resolved model config",
     "/skills": "List available skills",
     "/workflows": "List available workflows",
+    "/exit": "End the session",
+    "/quit": "End the session",
 }
 
 # Small curated starter phrases — intentionally short, not a catalog.

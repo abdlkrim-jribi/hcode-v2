@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 # Project-local .env (cwd) wins; the repo-root .env stays as a fallback so existing
@@ -33,10 +35,11 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 import click
 from langchain_core.messages import HumanMessage
+from rich.markup import escape
 
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.banner import render_banner, render_welcome, render_welcome_help
-from hcode_v2.cli.completion import build_chat_session
+from hcode_v2.cli.completion import CHAT_COMMANDS, build_chat_session
 from hcode_v2.cli.live import LiveTurnRenderer
 from hcode_v2.cli.display import HCodeDisplay
 from hcode_v2.cli.statusline import render_status
@@ -96,7 +99,7 @@ def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) 
     """
     display = HCodeDisplay()
     display.show_task_header(task)
-    display.console.print(f"[dim]Working directory: {workdir or os.getcwd()}[/dim]")
+    display.console.print(f"[dim]Working directory: {escape(workdir or os.getcwd())}[/dim]")
 
     async def _invoke() -> str:
         import datetime
@@ -190,14 +193,16 @@ def chat(session: str | None, workdir: str | None) -> None:
         click.echo(f"Resuming session: {session_id}")
     else:
         click.echo(f"New session: {session_id}")
-    display.console.print(f"[dim]Working directory: {workdir or os.getcwd()}[/dim]")
+    display.console.print(f"[dim]Working directory: {escape(workdir or os.getcwd())}[/dim]")
     display.console.print("[dim]Type /exit or /quit to end the session.[/dim]\n")
 
     async def _chat_loop() -> None:
+        nonlocal session_id  # /clear rotates it; without this the assignment shadows it
         agent = await create_hcode_agent(session_id=session_id, work_dir=workdir)
         # Input layer: completion (slash commands, file paths, phrases),
         # FileHistory + auto-suggest. Dispatch below is unchanged.
         prompt_session = build_chat_session(work_dir=workdir)
+        show_todos = True  # /todos toggle (loop-local)
 
         while True:
             # Persistent-feel status line: re-rendered just above each prompt.
@@ -212,31 +217,34 @@ def chat(session: str | None, workdir: str | None) -> None:
             if not user_input:
                 continue
 
-            if user_input in ("/exit", "/quit"):
-                display.console.print("[dim]Goodbye.[/dim]")
-                break
-
-            if user_input == "/skills":
-                skills = [
-                    d.name
-                    for d in Path(".hcode/skills").iterdir()
-                    if d.is_dir() and (d / "SKILL.md").exists()
-                ] if Path(".hcode/skills").is_dir() else []
-                display.show_skills(skills)
-                continue
-
-            if user_input == "/workflows":
-                workflows = [
-                    p.stem
-                    for p in Path(".hcode/workflows").glob("*.md")
-                ] if Path(".hcode/workflows").is_dir() else []
-                display.show_workflows(workflows)
-                continue
+            if user_input.startswith("/"):
+                ctx = SimpleNamespace(
+                    console=display.console,
+                    mcp_config_path=".hcode/mcp_config.json",
+                    session_id=session_id,
+                    show_todos=show_todos,
+                    chat_commands=CHAT_COMMANDS,
+                    config=Config.from_env(),
+                )
+                result = handle_chat_command(user_input, ctx)
+                if result.handled:
+                    if result.should_exit:
+                        display.console.print("[dim]Goodbye.[/dim]")
+                        break
+                    if result.new_session_id is not None:
+                        session_id = result.new_session_id
+                        display.console.print("[dim]Conversation cleared — new session.[/dim]")
+                    if result.show_todos is not None:
+                        show_todos = result.show_todos
+                    # show_todos is tracked here; making LiveTurnRenderer actually
+                    # hide/show the checklist from it is a follow-up in live.py.
+                    continue
+                # Unrecognized slash command -> fall through to the agent.
 
             try:
                 # C3: stream the turn so the plan and todo progress render
                 # live. Display-only — same invocation semantics as ainvoke.
-                renderer = LiveTurnRenderer(console=display.console)
+                renderer = LiveTurnRenderer(console=display.console, show_todos=show_todos)
                 with renderer:
                     async for event in agent.astream_events(
                         {"messages": [HumanMessage(content=user_input)]},
@@ -261,6 +269,306 @@ def chat(session: str | None, workdir: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# chat slash-command dispatch (shared, testable)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChatCommandResult:
+    """Outcome of one chat slash command — tells the loop what to do next.
+
+    Attributes:
+        handled: True if recognized and acted on; the loop continues and does
+            NOT forward the text to the agent. False -> fall through and send
+            the raw text to the agent as a normal prompt.
+        should_exit: True -> break the chat loop.
+        new_session_id: Non-None -> rotate the thread id (/clear, /reset) so the
+            conversation starts fresh.
+        show_todos: Non-None -> the new /todos toggle value.
+    """
+
+    handled: bool = False
+    should_exit: bool = False
+    new_session_id: str | None = None
+    show_todos: bool | None = None
+
+
+# Canonical catalog for /help. Intentionally broader than completion's
+# CHAT_COMMANDS (which gates autocomplete); /help documents everything the
+# dispatcher accepts.
+_CHAT_HELP: dict[str, str] = {
+    "/help": "Show this help",
+    "/mcp": "Manage MCP servers (list/known/status/connect/add/remove)",
+    "/clear": "Clear the conversation (start a fresh session)",
+    "/todos": "Toggle the live task checklist",
+    "/config": "Show the resolved model configuration",
+    "/skills": "List available skills",
+    "/workflows": "List available workflows",
+    "/exit": "End the session",
+    "/quit": "End the session",
+}
+
+
+def _new_session_id(current: str | None) -> str:
+    """Return a fresh timestamp-based session id, guaranteed != ``current``."""
+    import datetime
+
+    new = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return new if new != current else new + "_x"
+
+
+def _render_chat_help(console) -> None:
+    console.print("[bold]Available commands:[/bold]")
+    for cmd, desc in _CHAT_HELP.items():
+        console.print(f"  [cyan]{cmd}[/cyan]  [dim]{desc}[/dim]")
+
+
+def _render_chat_config(console, config) -> None:
+    console.print("[bold]Model configuration:[/bold]")
+    console.print(f"  model:    [cyan]{config.model}[/cyan]")
+    console.print(f"  base_url: [dim]{config.base_url or '(provider default)'}[/dim]")
+    console.print(f"  toolcall: [dim]{config.toolcall_mode}[/dim]")
+
+
+# ── Shared MCP config ops — used by BOTH the chat /mcp command and the CLI ──
+
+def _mcp_add_custom_server(config_path, server_id: str, entry: dict) -> None:
+    """Write a custom server entry into the MCP config (read-modify-write)."""
+    path = Path(config_path)
+    config_data: dict = {"servers": {}}
+    if path.exists():
+        try:
+            config_data = json.loads(path.read_text())
+        except Exception:
+            config_data = {"servers": {}}
+    config_data.setdefault("servers", {})
+    config_data["servers"][server_id] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config_data, indent=2))
+
+
+def _mcp_remove_server(config_path, server_id: str) -> bool:
+    """Delete a server from the MCP config. Returns True if it was removed."""
+    path = Path(config_path)
+    if not path.exists():
+        return False
+    try:
+        config_data = json.loads(path.read_text())
+    except Exception:
+        return False
+    servers = config_data.get("servers", {})
+    if server_id not in servers:
+        return False
+    del servers[server_id]
+    path.write_text(json.dumps(config_data, indent=2))
+    return True
+
+
+def _render_mcp_known(console) -> None:
+    from deepagents.mcp.client import MCPClientManager
+    from rich.table import Table
+
+    manager = MCPClientManager()
+    table = Table(title="Available MCP Servers")
+    table.add_column("Name", style="cyan")
+    table.add_column("Description")
+    table.add_column("Requires", style="yellow")
+    for s in manager.list_known_servers():
+        requires = ", ".join(s.get("env_required", [])) or "-"
+        table.add_row(s["name"], s["description"], requires)
+    console.print(table)
+
+
+def _render_mcp_list(console, config_path=None) -> None:
+    from deepagents.mcp.client import MCPClientManager
+    from rich.table import Table
+
+    manager = MCPClientManager(str(config_path)) if config_path else MCPClientManager()
+    if not manager.is_configured:
+        console.print("[dim]No servers configured. Run: hcode mcp known[/dim]")
+        return
+    try:
+        config = json.loads(manager.config_path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]{exc}[/bold red]")
+        return
+    table = Table(title="Configured MCP Servers")
+    table.add_column("Name", style="cyan")
+    table.add_column("Command")
+    table.add_column("Args")
+    for name, cfg in config.get("servers", {}).items():
+        args = " ".join(cfg.get("args", []))
+        command = cfg.get("command") or cfg.get("url", "")
+        table.add_row(name, command, args)
+    console.print(table)
+
+
+def _render_mcp_status(console, config_path=None) -> None:
+    from deepagents.mcp.client import MCPClientManager
+
+    manager = MCPClientManager(str(config_path)) if config_path else MCPClientManager()
+    console.print(f"[bold]MCP config:[/bold] {manager.config_path}")
+    if not manager.is_configured:
+        console.print("[dim]No servers configured. Run: hcode mcp known[/dim]")
+        return
+    try:
+        config = json.loads(manager.config_path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]{exc}[/bold red]")
+        return
+    servers = config.get("servers", {})
+    console.print(f"[green]{len(servers)} server(s) configured:[/green]")
+    for name, cfg in servers.items():
+        transport = cfg.get("command") or cfg.get("url", "")
+        console.print(f"  • {name} [dim]({transport})[/dim]")
+
+
+def _chat_mcp_connect(console, config_path, server: str) -> None:
+    """Add a known preset to the config (reuses MCPClientManager; no connection)."""
+    from deepagents.mcp.client import MCPClientManager
+
+    manager = MCPClientManager(str(config_path))
+    known = manager.get_known_server(server)
+    if not known:
+        console.print(f"[red]Unknown server: '{server}'. Try /mcp known.[/red]")
+        return
+    if manager.is_configured:
+        try:
+            existing = json.loads(manager.config_path.read_text())
+            if server in existing.get("servers", {}):
+                console.print(f"[yellow]{server} already configured.[/yellow]")
+                return
+        except Exception:
+            pass
+    manager.add_server_to_config(server, known)
+    console.print(f"[green]Added '{server}' to {manager.config_path}[/green]")
+    if known.get("env_required"):
+        console.print(f"[yellow]Required env vars: {', '.join(known['env_required'])}[/yellow]")
+
+
+def _chat_mcp_add(console, config_path, tokens: list[str]) -> None:
+    """Parse `<id> --command CMD | --url URL [--args A]* [--env K=V]*` and write it."""
+    if not tokens:
+        console.print("[red]Usage: /mcp add <id> --command <cmd> | --url <url>[/red]")
+        return
+    server_id = tokens[0]
+    rest = tokens[1:]
+    command = url = name = description = None
+    args_list: list[str] = []
+    env: dict[str, str] = {}
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        nxt = rest[i + 1] if i + 1 < len(rest) else None
+        if tok == "--command" and nxt is not None:
+            command, i = nxt, i + 2
+        elif tok == "--url" and nxt is not None:
+            url, i = nxt, i + 2
+        elif tok == "--args" and nxt is not None:
+            args_list.append(nxt)
+            i += 2
+        elif tok == "--env" and nxt is not None:
+            if "=" in nxt:
+                key, value = nxt.split("=", 1)
+                env[key] = value
+            i += 2
+        elif tok == "--name" and nxt is not None:
+            name, i = nxt, i + 2
+        elif tok == "--description" and nxt is not None:
+            description, i = nxt, i + 2
+        else:
+            i += 1
+    if bool(url) == bool(command):
+        console.print("[red]Provide exactly one of --url or --command.[/red]")
+        return
+    entry: dict = {}
+    if command:
+        entry["command"] = command
+        entry["args"] = args_list
+    else:
+        entry["url"] = url
+    if env:
+        entry["env"] = env
+    entry["name"] = name or server_id
+    if description:
+        entry["description"] = description
+    _mcp_add_custom_server(config_path, server_id, entry)
+    console.print(f"[green]Added '{server_id}' to {config_path}[/green]")
+
+
+def _handle_chat_mcp(tokens: list[str], ctx) -> None:
+    sub = tokens[0].lower() if tokens else "list"
+    rest = tokens[1:]
+    console = ctx.console
+    path = ctx.mcp_config_path
+    if sub == "list":
+        _render_mcp_list(console, path)
+    elif sub == "known":
+        _render_mcp_known(console)
+    elif sub == "status":
+        _render_mcp_status(console, path)
+    elif sub == "connect" and rest:
+        _chat_mcp_connect(console, path, rest[0])
+    elif sub == "add":
+        _chat_mcp_add(console, path, rest)
+    elif sub == "remove" and rest:
+        if _mcp_remove_server(path, rest[0]):
+            console.print(f"[green]Removed '{rest[0]}' from {path}[/green]")
+        else:
+            console.print(f"[red]Server '{rest[0]}' is not configured.[/red]")
+    else:
+        console.print("[red]Unknown /mcp command. Try /mcp known.[/red]")
+
+
+def handle_chat_command(cmd: str, ctx) -> ChatCommandResult:
+    """Dispatch one chat slash command.
+
+    Prints to ``ctx.console`` and returns a :class:`ChatCommandResult` telling
+    the loop what to do. ``ctx`` provides ``console``, ``mcp_config_path``,
+    ``session_id``, ``show_todos``, ``chat_commands`` and ``config``.
+    Unrecognized slash commands return ``handled=False`` so the loop forwards
+    the raw text to the agent.
+    """
+    raw = cmd.strip()
+    if not raw.startswith("/"):
+        return ChatCommandResult(handled=False)
+    parts = raw.split()
+    name = parts[0].lower()
+    args = parts[1:]
+
+    if name in ("/help", "/h", "/?"):
+        _render_chat_help(ctx.console)
+        return ChatCommandResult(handled=True)
+    if name in ("/exit", "/quit", "/q", "/bye"):
+        return ChatCommandResult(handled=True, should_exit=True)
+    if name in ("/clear", "/reset"):
+        return ChatCommandResult(handled=True, new_session_id=_new_session_id(ctx.session_id))
+    if name == "/todos":
+        return ChatCommandResult(handled=True, show_todos=not ctx.show_todos)
+    if name == "/mcp":
+        _handle_chat_mcp(args, ctx)
+        return ChatCommandResult(handled=True)
+    if name == "/config":
+        _render_chat_config(ctx.console, ctx.config)
+        return ChatCommandResult(handled=True)
+    if name == "/skills":
+        skills = [
+            d.name
+            for d in Path(".hcode/skills").iterdir()
+            if d.is_dir() and (d / "SKILL.md").exists()
+        ] if Path(".hcode/skills").is_dir() else []
+        HCodeDisplay(ctx.console).show_skills(skills)
+        return ChatCommandResult(handled=True)
+    if name == "/workflows":
+        workflows = [
+            p.stem for p in Path(".hcode/workflows").glob("*.md")
+        ] if Path(".hcode/workflows").is_dir() else []
+        HCodeDisplay(ctx.console).show_workflows(workflows)
+        return ChatCommandResult(handled=True)
+    return ChatCommandResult(handled=False)
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
@@ -282,51 +590,13 @@ def mcp_cmd() -> None:
 @mcp_cmd.command(name="known")
 def mcp_known() -> None:
     """Show all available preset MCP servers."""
-    from deepagents.mcp.client import MCPClientManager
-    from rich.table import Table
-
-    display = HCodeDisplay()
-    manager = MCPClientManager()
-    servers = manager.list_known_servers()
-    table = Table(title="Available MCP Servers")
-    table.add_column("Name", style="cyan")
-    table.add_column("Description")
-    table.add_column("Requires", style="yellow")
-    for s in servers:
-        requires = ", ".join(s.get("env_required", [])) or "-"
-        table.add_row(s["name"], s["description"], requires)
-    display.console.print(table)
+    _render_mcp_known(HCodeDisplay().console)
 
 
 @mcp_cmd.command(name="list")
 def mcp_list() -> None:
     """Show configured servers from .hcode/mcp_config.json."""
-    from deepagents.mcp.client import MCPClientManager
-    from rich.table import Table
-
-    display = HCodeDisplay()
-    manager = MCPClientManager()
-
-    if not manager.is_configured:
-        display.console.print(
-            "[dim]No servers configured. "
-            "Run: hcode mcp known[/dim]"
-        )
-        return
-    try:
-        config = json.loads(manager.config_path.read_text())
-        servers_dict = config.get("servers", {})
-        table = Table(title="Configured MCP Servers")
-        table.add_column("Name", style="cyan")
-        table.add_column("Command")
-        table.add_column("Args")
-        for name, cfg in servers_dict.items():
-            args = " ".join(cfg.get("args", []))
-            command = cfg.get("command") or cfg.get("url", "")
-            table.add_row(name, command, args)
-        display.console.print(table)
-    except Exception as e:
-        display.show_error(str(e))
+    _render_mcp_list(HCodeDisplay().console)
 
 
 @mcp_cmd.command(name="connect")
@@ -419,22 +689,12 @@ def mcp_add(
     if description:
         entry["description"] = description
 
-    # The preset helper (`add_server_to_config`, used by `connect`) only persists
-    # command/args/env, so custom servers carrying url/name/description are written
-    # here via a read-modify-write against the same config file.
+    # Custom servers carry url/name/description (which the preset helper drops),
+    # so they're written via the shared read-modify-write helper (also used by
+    # the chat /mcp add command).
     manager = MCPClientManager()
-    config_path = manager.config_path
-    config_data: dict = {"servers": {}}
-    if config_path.exists():
-        try:
-            config_data = json.loads(config_path.read_text())
-        except Exception:
-            config_data = {"servers": {}}
-    config_data.setdefault("servers", {})
-    config_data["servers"][server_id] = entry
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(config_data, indent=2))
-    display.console.print(f"[green]Added '{server_id}' to {config_path}[/green]")
+    _mcp_add_custom_server(manager.config_path, server_id, entry)
+    display.console.print(f"[green]Added '{server_id}' to {manager.config_path}[/green]")
 
 
 @mcp_cmd.command(name="remove")
@@ -445,50 +705,17 @@ def mcp_remove(server_id: str) -> None:
 
     display = HCodeDisplay()
     manager = MCPClientManager()
-    config_path = manager.config_path
-
-    if not config_path.exists():
-        display.show_error(f"No MCP config at {config_path}.")
+    if _mcp_remove_server(manager.config_path, server_id):
+        display.console.print(f"[green]Removed '{server_id}' from {manager.config_path}[/green]")
+    else:
+        display.show_error(f"Server '{server_id}' is not configured or no config exists.")
         sys.exit(1)
-    try:
-        config_data = json.loads(config_path.read_text())
-    except Exception as e:
-        display.show_error(str(e))
-        sys.exit(1)
-
-    servers = config_data.get("servers", {})
-    if server_id not in servers:
-        display.show_error(f"Server '{server_id}' is not configured.")
-        sys.exit(1)
-    del servers[server_id]
-    config_path.write_text(json.dumps(config_data, indent=2))
-    display.console.print(f"[green]Removed '{server_id}' from {config_path}[/green]")
 
 
 @mcp_cmd.command(name="status")
 def mcp_status() -> None:
     """Summarise the local MCP configuration (no network connections)."""
-    from deepagents.mcp.client import MCPClientManager
-
-    display = HCodeDisplay()
-    manager = MCPClientManager()
-
-    display.console.print(f"[bold]MCP config:[/bold] {manager.config_path}")
-    if not manager.is_configured:
-        display.console.print(
-            "[dim]No servers configured. Run: hcode mcp known[/dim]"
-        )
-        return
-    try:
-        config = json.loads(manager.config_path.read_text())
-    except Exception as e:
-        display.show_error(str(e))
-        return
-    servers = config.get("servers", {})
-    display.console.print(f"[green]{len(servers)} server(s) configured:[/green]")
-    for name, cfg in servers.items():
-        transport = cfg.get("command") or cfg.get("url", "")
-        display.console.print(f"  • {name} [dim]({transport})[/dim]")
+    _render_mcp_status(HCodeDisplay().console)
 
 
 # ---------------------------------------------------------------------------

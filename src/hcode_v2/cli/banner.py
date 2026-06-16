@@ -136,6 +136,8 @@ def render_welcome_help(console: Console) -> None:
         ("Ctrl+Space", "Show Suggestions"),
         ("↑ / ↓", "History Nav"),
         ("/todos", "Toggle Tasks"),
+        ("/help", "All Commands"),
+        ("/mcp", "MCP Servers"),
     ):
         row = Text(no_wrap=True)
         row.append(f" {key} ", style="bold #111111 on #00FFFF")  # chip

@@ -23,8 +23,8 @@ class HCodeDisplay:
     the caller never has to import Rich directly.
     """
 
-    def __init__(self) -> None:
-        self.console: Console = Console(force_terminal=True)
+    def __init__(self, console: Console | None = None) -> None:
+        self.console: Console = console or Console(force_terminal=True)
 
     def show_task_header(self, task: str) -> None:
         """Print a bordered panel announcing the task being executed.
