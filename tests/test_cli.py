@@ -372,6 +372,57 @@ def test_render_welcome_renders_tips() -> None:
     assert "/exit" in out
 
 
+# --- render_welcome_help (v1 TIPS + COMMANDS two-column block) --------------
+#
+# NEW function render_welcome_help(console): renders v1's welcome help screen
+# (a TIPS column and a COMMANDS column) straight to the given console. Asserted
+# on the recorded text only — content, not glyphs/colors. A wide console keeps
+# the two-column rows from wrapping mid-phrase.
+
+
+def test_render_welcome_help_shows_tips_section() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_welcome_help
+
+    console = Console(record=True, width=120)
+    render_welcome_help(console)
+    out = console.export_text()
+    assert "TIPS" in out
+    assert "Type naturally" in out
+    assert "/commands" in out or "commands for special actions" in out
+    assert "Ctrl+C" in out
+    assert "/exit" in out
+    assert "stream" in out
+
+
+def test_render_welcome_help_shows_commands_section() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_welcome_help
+
+    console = Console(record=True, width=120)
+    render_welcome_help(console)
+    out = console.export_text()
+    assert "COMMANDS" in out
+    assert "Tab" in out
+    assert "Autocomplete" in out
+    assert "Ctrl+Space" in out
+    assert "Suggestions" in out
+    assert "History" in out
+    assert "/todos" in out
+    assert "Toggle" in out
+
+
+def test_render_welcome_help_does_not_raise_on_plain_console() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_welcome_help
+
+    # A plain (non-recording) console — rendering must complete without error.
+    render_welcome_help(Console())
+
+
 def test_bare_hcode_shows_banner_and_help() -> None:
     result = runner.invoke(cli, [])
     assert result.exit_code == 0
