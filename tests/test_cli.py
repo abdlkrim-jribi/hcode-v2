@@ -560,6 +560,99 @@ def test_build_chat_session_creates_history_dir(tmp_path: Path) -> None:
     assert session.completer is not None
 
 
+# --- chat input UX: force-completion key + bottom status bar ----------------
+#
+# We're adding two interactive affordances to the chat prompt — Ctrl+Space to
+# force completion, and a bottom status bar of hints. Live keypresses are
+# awkward to drive in a unit test, so we assert the CONSTRUCTED session's
+# configuration via its two public PromptSession attributes (key_bindings,
+# bottom_toolbar), not real input events.
+#
+# Control-space key constant: in the installed prompt_toolkit (3.0.52)
+# ``Keys.ControlSpace`` is an alias of ``Keys.ControlAt`` (enum value
+# ``'c-@'``). However a binding is registered (``Keys.ControlSpace``,
+# ``Keys.ControlAt``, or the ``'c-space'`` string alias) its stored key
+# normalizes to ``Keys.ControlAt`` / ``'c-@'`` — so we match tolerantly.
+
+from prompt_toolkit.formatted_text import (  # noqa: E402
+    fragment_list_to_text,
+    to_formatted_text,
+)
+from prompt_toolkit.key_binding import KeyBindings  # noqa: E402
+from prompt_toolkit.keys import Keys  # noqa: E402
+
+
+def _built_chat_session(tmp_path: Path):
+    """Build the chat session under a headless app session (pipe in / dummy
+    out, no real terminal) and capture what we assert on.
+
+    The bottom toolbar is resolved to plain text *while an app is active*,
+    since a callable toolbar may consult app state. Returns a namespace with
+    ``key_bindings``, ``bottom_toolbar`` (the raw attribute) and
+    ``toolbar_text`` (resolved text, or ``None`` if no toolbar is set).
+    """
+    from types import SimpleNamespace
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    history = tmp_path / ".hcode" / "chat_history.txt"
+    with create_pipe_input() as pipe:
+        with create_app_session(input=pipe, output=DummyOutput()):
+            session = build_chat_session(
+                work_dir=str(tmp_path), history_path=str(history)
+            )
+            toolbar = session.bottom_toolbar
+            toolbar_text = None
+            if toolbar is not None:
+                value = toolbar() if callable(toolbar) else toolbar
+                toolbar_text = fragment_list_to_text(to_formatted_text(value))
+    return SimpleNamespace(
+        key_bindings=session.key_bindings,
+        bottom_toolbar=toolbar,
+        toolbar_text=toolbar_text,
+    )
+
+
+def _ctrl_space_bindings(key_bindings: KeyBindings) -> list:
+    """Bindings whose key sequence includes Ctrl+Space, tolerant of how it was
+    registered (all forms normalize to ``Keys.ControlAt`` / value ``'c-@'``)."""
+    matches = []
+    for binding in key_bindings.bindings:
+        for key in binding.keys:
+            if key == Keys.ControlSpace or getattr(key, "value", key) in ("c-@", "c-space"):
+                matches.append(binding)
+                break
+    return matches
+
+
+def test_build_chat_session_attaches_key_bindings(tmp_path: Path) -> None:
+    # Today v2 passes no key_bindings, so this is None — must become a real
+    # KeyBindings object once Ctrl+Space is wired.
+    built = _built_chat_session(tmp_path)
+    assert built.key_bindings is not None
+    assert isinstance(built.key_bindings, KeyBindings)
+
+
+def test_build_chat_session_binds_ctrl_space_for_completion(tmp_path: Path) -> None:
+    built = _built_chat_session(tmp_path)
+    assert built.key_bindings is not None
+    assert _ctrl_space_bindings(built.key_bindings), (
+        "no binding maps to Ctrl+Space (Keys.ControlSpace == Keys.ControlAt, 'c-@')"
+    )
+
+
+def test_build_chat_session_sets_status_bar_with_hints(tmp_path: Path) -> None:
+    built = _built_chat_session(tmp_path)
+    assert built.bottom_toolbar is not None
+    text = built.toolbar_text
+    # Tolerant of styling/formatting: we only require the hint tokens to appear
+    # somewhere in the resolved plain text.
+    for hint in ("Tab", "Ctrl+Space", "/help"):
+        assert hint in text, f"status bar missing hint {hint!r}: {text!r}"
+
+
 # --- chat slash-command dispatch --------------------------------------------
 #
 # Confirms the four wired commands still dispatch exactly as before with the

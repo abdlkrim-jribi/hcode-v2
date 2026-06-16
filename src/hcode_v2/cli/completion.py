@@ -21,7 +21,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion, merge_completers
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 
 _DEFAULT_HISTORY_PATH = ".hcode/chat_history.txt"
 
@@ -206,6 +209,37 @@ def build_chat_completer(work_dir: str | None = None) -> Completer:
     )
 
 
+def _build_chat_key_bindings() -> KeyBindings:
+    """Key bindings for the chat prompt.
+
+    Adds Ctrl+Space as a force-completion trigger: it opens the completion
+    menu without auto-selecting the first item, so the user can browse the
+    offered completions. Tab keeps prompt_toolkit's default behaviour (we do
+    not override it).
+
+    Note: in prompt_toolkit 3.0.x ``Keys.ControlSpace`` is an alias of
+    ``Keys.ControlAt`` (value ``'c-@'``).
+    """
+    kb = KeyBindings()
+
+    @kb.add(Keys.ControlSpace)
+    def _(event) -> None:  # noqa: ANN001 - prompt_toolkit event object
+        event.app.current_buffer.start_completion(select_first=False)
+
+    return kb
+
+
+def _bottom_toolbar() -> HTML:
+    """Static hint bar shown beneath the chat prompt.
+
+    Independent of app/buffer state so it resolves identically on every call.
+    """
+    return HTML(
+        " <b>Tab</b> Complete  │  <b>Ctrl+Space</b> Suggestions  "
+        "│  <b>↑↓</b> History  │  <b>/help</b> Commands "
+    )
+
+
 def build_chat_session(
     work_dir: str | None = None,
     history_path: str = _DEFAULT_HISTORY_PATH,
@@ -227,6 +261,8 @@ def build_chat_session(
         history=FileHistory(str(history_file)),
         auto_suggest=AutoSuggestFromHistory(),
         complete_while_typing=True,
+        key_bindings=_build_chat_key_bindings(),
+        bottom_toolbar=_bottom_toolbar,
     )
 
 
