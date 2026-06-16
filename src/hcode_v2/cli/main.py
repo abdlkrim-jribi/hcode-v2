@@ -35,7 +35,7 @@ import click
 from langchain_core.messages import HumanMessage
 
 from hcode_v2.agent.factory import create_hcode_agent
-from hcode_v2.cli.banner import render_banner, render_welcome
+from hcode_v2.cli.banner import render_banner, render_welcome, render_welcome_help
 from hcode_v2.cli.completion import build_chat_session
 from hcode_v2.cli.live import LiveTurnRenderer
 from hcode_v2.cli.display import HCodeDisplay
@@ -185,6 +185,7 @@ def chat(session: str | None, workdir: str | None) -> None:
     # Banner once at session start, then session/working-dir context.
     display.console.print(render_banner())
     display.console.print(render_welcome())
+    render_welcome_help(display.console)
     if session:
         click.echo(f"Resuming session: {session_id}")
     else:

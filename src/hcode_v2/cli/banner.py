@@ -8,9 +8,12 @@ with a green→cyan gradient, a tagline, and a version line.
 from __future__ import annotations
 
 from rich.align import Align
-from rich.console import Group, RenderableType
+from rich.columns import Columns
+from rich.console import Console, Group, RenderableType
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 
 # Block-letter "HCODE" — a clean, self-contained ASCII title (no figlet dep).
@@ -85,4 +88,67 @@ def render_welcome() -> RenderableType:
     return Panel(tips, title="Welcome", border_style="green", expand=False)
 
 
-__all__ = ["render_banner", "render_welcome"]
+def _gutter_block(title: str, color: str, rows: list[RenderableType]) -> RenderableType:
+    """A titled block with a left "│" gutter bar per content row.
+
+    Rich can't draw a single-side panel border, so (as in v1) we fake it with a
+    narrow gutter column that prints a coloured "│" beside each row.
+    """
+    grid = Table.grid(padding=(0, 0))
+    grid.add_column(width=2)          # gutter bar
+    grid.add_column(no_wrap=True)     # content (no_wrap keeps phrases contiguous)
+    grid.add_row(" ", Text(title, style=f"bold {color}"))
+    grid.add_row(" ", Text(""))       # spacer under the title
+    for content in rows:
+        grid.add_row(Text("│ ", style=f"bold {color}"), content)
+    return grid
+
+
+def render_welcome_help(console: Console) -> None:
+    """Print v1's TIPS + COMMANDS welcome help: two gutter blocks side by side.
+
+    Unlike :func:`render_welcome` (which returns a renderable), this PRINTS
+    straight to ``console`` — matching the interactive chat startup call site.
+    Pure rendering; never raises on a plain console.
+    """
+    # Centered gradient header, reusing the banner's green→cyan gradient.
+    console.print()
+    console.print(Align.center(_gradient_line("INTERACTIVE  CHAT  MODE")))
+    console.print()
+
+    # ── TIPS: a "⚡" icon per row, neon-green title/gutter ──────────────────
+    tips_rows: list[RenderableType] = []
+    for text in (
+        "Type naturally, HCode understands context",
+        "Use /commands for special actions",
+        "Press Ctrl+C to interrupt, /exit to quit",
+        "Responses stream in real-time",
+    ):
+        row = Text(no_wrap=True)
+        row.append("⚡  ", style="#39FF14")
+        row.append(text, style="dim")
+        tips_rows.append(row)
+
+    # ── COMMANDS: key chips → meaning, cyan title/gutter ───────────────────
+    cmd_rows: list[RenderableType] = []
+    for key, meaning in (
+        ("Tab", "Autocomplete"),
+        ("Ctrl+Space", "Show Suggestions"),
+        ("↑ / ↓", "History Nav"),
+        ("/todos", "Toggle Tasks"),
+    ):
+        row = Text(no_wrap=True)
+        row.append(f" {key} ", style="bold #111111 on #00FFFF")  # chip
+        row.append("  →  ", style="dim")
+        row.append(meaning, style="dim")
+        cmd_rows.append(row)
+
+    tips_block = _gutter_block("TIPS", "#39FF14", tips_rows)
+    cmd_block = _gutter_block("COMMANDS", "#00FFFF", cmd_rows)
+
+    columns = Columns([tips_block, cmd_block], expand=True, align="center")
+    console.print(Padding(columns, (0, 4)))
+    console.print()
+
+
+__all__ = ["render_banner", "render_welcome", "render_welcome_help"]
