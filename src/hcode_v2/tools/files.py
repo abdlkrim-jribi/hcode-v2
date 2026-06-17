@@ -32,6 +32,22 @@ def _diff_artifact(diff: str, additions: int, deletions: int, path: str) -> dict
     return {"diff": diff, "additions": additions, "deletions": deletions, "path": path}
 
 
+def _resolve_path(path: str) -> Path:
+    """Resolve a tool path argument to a real filesystem path.
+
+    A genuine OS-absolute path (a drive-qualified path on Windows, or a real
+    POSIX absolute path) is honored verbatim. A leading-slash/backslash path
+    that is rooted but driveless on Windows (e.g. ``/app.py`` from a model under
+    ``virtual_mode=False``) is treated as ROOT-RELATIVE: the leading separators
+    are stripped and the remainder joined under :func:`get_root_dir`, so it lands
+    INSIDE the working dir instead of collapsing to the drive root. Normal
+    relative paths are joined under the working dir unchanged.
+    """
+    if Path(path).is_absolute():
+        return Path(path)
+    return get_root_dir() / path.lstrip("/\\")
+
+
 @tool
 def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
     """Read a file and return its contents, optionally limited to a line range.
@@ -41,7 +57,7 @@ def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = 
         start_line: First line to include (1-based, inclusive).
         end_line: Last line to include (1-based, inclusive).
     """
-    target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
+    target = _resolve_path(path)
     if not target.exists():
         return f"Error: file not found: {path}"
     try:
@@ -69,7 +85,7 @@ def write(path: str, content: str, append: bool = False) -> tuple[str, dict]:
         content: Text to write.
         append: If True, append instead of overwrite.
     """
-    target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
+    target = _resolve_path(path)
     # Capture the prior content (if any) so an overwrite shows a real diff; a
     # brand-new file diffs against empty (every line is an addition).
     try:
@@ -109,7 +125,7 @@ def edit(path: str, old_string: str, new_string: str) -> tuple[str, dict]:
         old_string: Exact text to find and replace.
         new_string: Replacement text.
     """
-    target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
+    target = _resolve_path(path)
     if not target.exists():
         return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:
@@ -166,7 +182,7 @@ def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> tuple[str, dict]:
         path: Relative or absolute path to the file.
         edits: List of {old_string, new_string} operations applied in order.
     """
-    target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
+    target = _resolve_path(path)
     if not target.exists():
         return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:

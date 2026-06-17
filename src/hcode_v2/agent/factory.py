@@ -73,10 +73,14 @@ def _build_model():
 def _build_env_block(work_dir: str) -> str:
     """Build the OpenCode-style ``<env>`` orientation block for the system prompt.
 
-    Declarative facts only (working directory, platform, git-repo flag, date) so
-    the model knows where it is and stops wandering the real filesystem (``ls /``)
-    in the execute phase. The path is the resolved absolute working directory —
-    the form the shell/execute tools and HCode's own file tools actually use.
+    Declarative facts (working directory, platform, git-repo flag, date) plus a
+    one-line path convention, so the model knows where it is and stops wandering
+    the real filesystem (``ls /``) in the execute phase. The path is the resolved
+    absolute working directory — the form the shell/execute tools and HCode's own
+    file tools actually use. The path-convention line matters because the backend
+    runs with ``virtual_mode=False`` (real OS paths): a bare ``/foo`` would
+    resolve to the drive root, so the model is told to use relative or full
+    absolute paths.
     """
     root = Path(work_dir).resolve()
     is_git = "yes" if (root / ".git").exists() else "no"
@@ -86,6 +90,9 @@ def _build_env_block(work_dir: str) -> str:
         f"Platform: {platform.system()}\n"
         f"Is git repo: {is_git}\n"
         f"Today's date: {date.today().isoformat()}\n"
+        "Write file paths relative to the working directory (e.g. temps5.py) or "
+        "as a full absolute path; do not use a leading-slash root path like "
+        "/temps5.py.\n"
         "</env>"
     )
 
@@ -115,9 +122,13 @@ async def create_hcode_agent(
     model = _build_model()
 
     # Create backend ONCE — shared by SummarizationMiddleware and agent.
-    # virtual_mode=True anchors the virtual `/` root to work_dir, so the model's
-    # `/calculator.py` resolves to {work_dir}/calculator.py instead of the OS
-    # drive root. Defaults to the current working directory.
+    # virtual_mode=False: the deepagents builtins use REAL OS paths anchored at
+    # root_dir — the SAME directory hcode's own file tools resolve against
+    # (get_root_dir reads HCODE_ROOT_DIR). With virtual_mode=True the backend
+    # remapped "/" to work_dir and (via the Windows-abs rejection + the
+    # "/workspace/…" prompt example) nudged the model into emitting
+    # "/workspace/temps5.py", which hcode's write then joined under the cwd as a
+    # phantom <cwd>/workspace/ subdir. Real paths make both tool families agree.
     # inherit_env=True gives the execute tool the parent environment (PATH
     # included) — without it the backend runs commands with an EMPTY env, so
     # `python` / `pytest` are never found and the execute phase dead-ends.
@@ -132,7 +143,7 @@ async def create_hcode_agent(
     # page (cp1252/cp1256) and the reader's UTF-8 decode hits invalid bytes.
     backend = LocalShellBackend(
         root_dir=resolved_work_dir,
-        virtual_mode=True,
+        virtual_mode=False,
         inherit_env=True,
         env={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
     )

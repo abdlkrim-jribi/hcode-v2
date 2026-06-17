@@ -124,3 +124,29 @@ def test_hcode_edit_tools_carry_artifact_format(tmp_path, monkeypatch) -> None:
         assert getattr(tool, "response_format", None) == "content_and_artifact", (
             f"hcode '{name}' must declare response_format='content_and_artifact'"
         )
+
+
+def test_backend_uses_real_paths_not_virtual(tmp_path, monkeypatch) -> None:
+    # Working-dir bug fix: with virtual_mode=True the deepagents backend remaps
+    # "/" to the launch dir, which (combined with the Windows-abs rejection and
+    # the "/workspace/…" example) makes the model emit "/workspace/temps5.py" —
+    # hcode's own write then joins that under the cwd as <cwd>/workspace/temps5.py.
+    # Setting virtual_mode=False makes the builtins use REAL OS paths anchored at
+    # root_dir, the SAME directory hcode's get_root_dir() resolves against, so a
+    # plain "temps5.py" lands in the launch dir for both tool families.
+    from hcode_v2.tools.base import get_root_dir
+
+    captured = _capture_create_deep_agent_kwargs(monkeypatch, tmp_path)
+    backend = captured["backend"]
+
+    # No virtual "/" remapping — builtins operate on real OS paths.
+    assert backend.virtual_mode is False, (
+        "LocalShellBackend must be virtual_mode=False so the deepagents builtins "
+        "use real OS paths instead of a remapped virtual root"
+    )
+
+    # The backend root (its resolved cwd) is the launch working dir...
+    assert backend.cwd == Path(tmp_path).resolve()
+    # ...and it is the SAME directory hcode's own tools anchor to (get_root_dir
+    # reads HCODE_ROOT_DIR), so the builtins and hcode's tools can't diverge.
+    assert backend.cwd == get_root_dir().resolve()
