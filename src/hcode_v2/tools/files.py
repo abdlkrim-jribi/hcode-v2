@@ -16,6 +16,22 @@ from hcode_v2.tools.base import get_root_dir
 _MAX_READ_LINES = 800
 
 
+def _diff_counts(diff_lines: List[str]) -> tuple[int, int]:
+    """Count added/removed content lines in a unified diff.
+
+    Additions are ``+`` lines excluding the ``+++`` file header; deletions are
+    ``-`` lines excluding the ``---`` file header.
+    """
+    additions = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+    deletions = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    return additions, deletions
+
+
+def _diff_artifact(diff: str, additions: int, deletions: int, path: str) -> dict:
+    """Structured diff artifact carried on the tool's ToolMessage."""
+    return {"diff": diff, "additions": additions, "deletions": deletions, "path": path}
+
+
 @tool
 def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
     """Read a file and return its contents, optionally limited to a line range.
@@ -44,8 +60,8 @@ def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = 
     return numbered
 
 
-@tool
-def write(path: str, content: str, append: bool = False) -> str:
+@tool(response_format="content_and_artifact")
+def write(path: str, content: str, append: bool = False) -> tuple[str, dict]:
     """Write content to a file, overwriting or appending.
 
     Args:
@@ -54,19 +70,38 @@ def write(path: str, content: str, append: bool = False) -> str:
         append: If True, append instead of overwrite.
     """
     target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
+    # Capture the prior content (if any) so an overwrite shows a real diff; a
+    # brand-new file diffs against empty (every line is an addition).
+    try:
+        old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+    except Exception:
+        old_text = ""
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
         with target.open(mode, encoding="utf-8") as fh:
             fh.write(content)
-        action = "Appended to" if append else "Wrote"
-        return f"{action} {target} ({len(content)} characters)"
     except Exception as exc:
-        return f"Error writing file: {exc}"
+        return f"Error writing file: {exc}", _diff_artifact("", 0, 0, path)
+
+    new_text = (old_text + content) if append else content
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(),
+        new_text.splitlines(),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+        lineterm="",
+    ))
+    diff = "\n".join(diff_lines)
+    additions, deletions = _diff_counts(diff_lines)
+    action = "Appended to" if append else "Wrote"
+    counts = f"+{additions}" if deletions == 0 else f"+{additions}, -{deletions}"
+    content_msg = f"{action} {Path(path).name} ({counts})"
+    return content_msg, _diff_artifact(diff, additions, deletions, path)
 
 
-@tool
-def edit(path: str, old_string: str, new_string: str) -> str:
+@tool(response_format="content_and_artifact")
+def edit(path: str, old_string: str, new_string: str) -> tuple[str, dict]:
     """Replace an exact string in a file (first occurrence).
 
     Args:
@@ -76,18 +111,18 @@ def edit(path: str, old_string: str, new_string: str) -> str:
     """
     target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
     if not target.exists():
-        return f"Error: file not found: {path}"
+        return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:
         original = target.read_text(encoding="utf-8")
     except Exception as exc:
-        return f"Error reading file: {exc}"
+        return f"Error reading file: {exc}", _diff_artifact("", 0, 0, path)
 
     if old_string not in original:
         # fuzzy fallback: strip leading whitespace per line
         stripped_old = "\n".join(l.strip() for l in old_string.splitlines())
         stripped_src = "\n".join(l.strip() for l in original.splitlines())
         if stripped_old not in stripped_src:
-            return f"Error: old_string not found in {path}"
+            return f"Error: old_string not found in {path}", _diff_artifact("", 0, 0, path)
         # rebuild with stripped match — just do a simple replace on the stripped version
         new_content = original.replace(old_string.strip(), new_string.strip(), 1)
     else:
@@ -96,16 +131,22 @@ def edit(path: str, old_string: str, new_string: str) -> str:
     try:
         target.write_text(new_content, encoding="utf-8")
     except Exception as exc:
-        return f"Error writing file: {exc}"
+        return f"Error writing file: {exc}", _diff_artifact("", 0, 0, path)
 
-    diff = list(difflib.unified_diff(
+    diff_lines = list(difflib.unified_diff(
         original.splitlines(keepends=True),
         new_content.splitlines(keepends=True),
         fromfile=f"a/{path}",
         tofile=f"b/{path}",
         n=3,
     ))
-    return "".join(diff) if diff else "No changes made."
+    diff = "".join(diff_lines)
+    additions, deletions = _diff_counts(diff_lines)
+    name = Path(path).name
+    if not diff:
+        return f"No changes to {name}", _diff_artifact("", 0, 0, path)
+    content = f"Edited {name} (+{additions}, -{deletions})"
+    return content, _diff_artifact(diff, additions, deletions, path)
 
 
 class _EditOperation(BaseModel):
@@ -118,7 +159,7 @@ class MultiEditInput(BaseModel):
     edits: List[_EditOperation]
 
 
-def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> str:
+def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> tuple[str, dict]:
     """Apply multiple sequential string replacements to a file.
 
     Args:
@@ -127,11 +168,11 @@ def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> str:
     """
     target = Path(path) if Path(path).is_absolute() else get_root_dir() / path
     if not target.exists():
-        return f"Error: file not found: {path}"
+        return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:
         content = target.read_text(encoding="utf-8")
     except Exception as exc:
-        return f"Error reading file: {exc}"
+        return f"Error reading file: {exc}", _diff_artifact("", 0, 0, path)
 
     original = content
     applied = 0
@@ -140,21 +181,30 @@ def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> str:
             content = content.replace(op.old_string, op.new_string, 1)
             applied += 1
         else:
-            return f"Error: old_string not found (edit #{applied + 1}): {op.old_string[:60]!r}"
+            return (
+                f"Error: old_string not found (edit #{applied + 1}): {op.old_string[:60]!r}",
+                _diff_artifact("", 0, 0, path),
+            )
 
     try:
         target.write_text(content, encoding="utf-8")
     except Exception as exc:
-        return f"Error writing file: {exc}"
+        return f"Error writing file: {exc}", _diff_artifact("", 0, 0, path)
 
-    diff = list(difflib.unified_diff(
+    diff_lines = list(difflib.unified_diff(
         original.splitlines(keepends=True),
         content.splitlines(keepends=True),
         fromfile=f"a/{path}",
         tofile=f"b/{path}",
         n=3,
     ))
-    return "".join(diff) if diff else f"Applied {applied} edit(s), no net change."
+    diff = "".join(diff_lines)
+    additions, deletions = _diff_counts(diff_lines)
+    name = Path(path).name
+    if not diff:
+        return f"Applied {applied} edit(s) to {name}, no net change", _diff_artifact("", 0, 0, path)
+    content_msg = f"Edited {name} (+{additions}, -{deletions})"
+    return content_msg, _diff_artifact(diff, additions, deletions, path)
 
 
 from langchain_core.tools import StructuredTool
@@ -164,6 +214,7 @@ multi_edit = StructuredTool.from_function(
     name="multi_edit",
     description="Apply multiple sequential string replacements to a file.",
     args_schema=MultiEditInput,
+    response_format="content_and_artifact",
 )
 
 
