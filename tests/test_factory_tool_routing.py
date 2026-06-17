@@ -150,3 +150,42 @@ def test_backend_uses_real_paths_not_virtual(tmp_path, monkeypatch) -> None:
     # ...and it is the SAME directory hcode's own tools anchor to (get_root_dir
     # reads HCODE_ROOT_DIR), so the builtins and hcode's tools can't diverge.
     assert backend.cwd == get_root_dir().resolve()
+
+
+def test_factory_wires_env_injecting_client_factory(tmp_path, monkeypatch) -> None:
+    # The MCP gap fix: create_hcode_agent must build the manager with HCode's
+    # env-injecting client factory, so a server's env_required secrets (e.g.
+    # GITHUB_TOKEN from .env -> os.environ) are injected before connect. We
+    # capture the MCPClientManager construction via a recording stub, force the
+    # MCP branch on (is_configured), and mock connect_all/build_tools so NO real
+    # subprocess spawns (CI-safe — no npx, no token).
+    from hcode_v2.agent.mcp_env import env_injecting_client_factory
+
+    captured: dict = {}
+
+    class _RecordingManager:
+        def __init__(self, config_path=None, *, _client_factory=None, **_kw) -> None:
+            captured["config_path"] = config_path
+            captured["_client_factory"] = _client_factory
+
+        @property
+        def is_configured(self) -> bool:
+            return True  # force the MCP branch to run
+
+        async def connect_all(self) -> None:  # no real connection
+            return None
+
+    monkeypatch.setattr(factory, "MCPClientManager", _RecordingManager)
+    # build_tools would otherwise probe the (fake) manager — stub it to no tools.
+    monkeypatch.setattr(
+        factory.MCPToolRegistry, "build_tools", staticmethod(lambda manager: [])
+    )
+
+    # Reuse the headless harness to actually run create_hcode_agent (it fakes
+    # create_deep_agent/_build_model). Our manager stub overrides the MCP path.
+    _capture_create_deep_agent_kwargs(monkeypatch, tmp_path)
+
+    assert captured.get("_client_factory") is env_injecting_client_factory, (
+        "create_hcode_agent must pass _client_factory=env_injecting_client_factory "
+        "to MCPClientManager so required secrets are injected before connect"
+    )

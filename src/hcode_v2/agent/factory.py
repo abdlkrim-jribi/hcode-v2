@@ -18,6 +18,7 @@ from deepagents.middleware.workflows import WorkflowMiddleware
 from deepagents.mcp.bridge import MCPToolRegistry
 from deepagents.mcp.client import MCPClientManager
 
+from hcode_v2.agent.mcp_env import env_injecting_client_factory
 from hcode_v2.provider.fallback import maybe_wrap
 from hcode_v2.tools.lsp_tools import verify_diagnostics_addendum
 from hcode_v2.utils.config import Config
@@ -170,7 +171,11 @@ async def create_hcode_agent(
     middleware.append(_ToolExclusionMiddleware(excluded=frozenset({"edit_file", "write_file"})))
 
     mcp_tools = []
-    manager = MCPClientManager(config_path=mcp_config)
+    # _client_factory injects each server's env_required secrets from os.environ
+    # (e.g. GITHUB_TOKEN from .env) into the per-server env before connect — the
+    # MCP SDK only forwards a safelist otherwise, so the token never reached the
+    # subprocess. HCode-side hook; libs/deepagents stays untouched.
+    manager = MCPClientManager(config_path=mcp_config, _client_factory=env_injecting_client_factory)
     if manager.is_configured:
         try:
             # connect_all() is async; build_tools() is a synchronous static
