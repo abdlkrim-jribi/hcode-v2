@@ -108,3 +108,65 @@ def test_edit_tool_response_format_is_content_and_artifact() -> None:
         assert tool_obj.response_format == "content_and_artifact", (
             f"{tool_obj.name} must declare response_format='content_and_artifact'"
         )
+
+
+# --- leading-slash path resolution (working-dir hardening) ------------------
+#
+# Under virtual_mode=False the model sometimes emits a leading-slash path like
+# "/app.py". Today the tools do ``Path(path) if Path(path).is_absolute() else
+# get_root_dir() / path`` — on Windows "/app.py" is NOT absolute (no drive), so
+# ``WindowsPath(root) / "/app.py"`` collapses to the DRIVE ROOT (C:\app.py),
+# escaping the working dir. We harden the resolver so a leading-slash path is
+# treated as ROOT-RELATIVE: strip the leading slash(es) and join under
+# get_root_dir(), landing inside the working dir. Real OS-absolute paths
+# (Windows "C:\..." here) are still honored as-is.
+#
+# HCODE_ROOT_DIR is pointed at tmp_path so get_root_dir() == the temp working dir.
+
+
+def test_write_leading_slash_path_stays_in_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    write.func(path="/probe.py", content="x = 1\n")
+    # Must land INSIDE the working dir, not at the drive root.
+    target = tmp_path / "probe.py"
+    assert target.is_file(), "leading-slash write escaped the working dir (drive root?)"
+    assert target.read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_write_nested_leading_slash_in_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    write.func(path="/sub/probe.py", content="y = 2\n")
+    target = tmp_path / "sub" / "probe.py"
+    assert target.is_file(), "nested leading-slash write escaped the working dir"
+    assert target.read_text(encoding="utf-8") == "y = 2\n"
+
+
+def test_write_relative_path_unchanged(tmp_path: Path, monkeypatch) -> None:
+    # Regression guard: a normal relative path keeps resolving under the root.
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    write.func(path="probe.py", content="z = 3\n")
+    target = tmp_path / "probe.py"
+    assert target.is_file()
+    assert target.read_text(encoding="utf-8") == "z = 3\n"
+
+
+def test_edit_leading_slash_path_stays_in_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    in_root = tmp_path / "e.py"
+    in_root.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    edit.func(path="/e.py", old_string="beta", new_string="BETA_CHANGED")
+
+    # The edit must have applied to the in-root file (not failed on a drive-root
+    # path that doesn't exist).
+    assert in_root.read_text(encoding="utf-8") == "alpha\nBETA_CHANGED\ngamma\n"
+
+
+def test_real_absolute_path_respected(tmp_path: Path, monkeypatch) -> None:
+    # A genuine OS-absolute path is still used verbatim (not re-rooted): the
+    # hardening only re-homes leading-slash/relative paths.
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    target = tmp_path / "abs.py"
+    write.func(path=str(target), content="a = 0\n")  # str(target) is absolute
+    assert target.is_file()
+    assert target.read_text(encoding="utf-8") == "a = 0\n"
