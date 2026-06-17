@@ -6,6 +6,7 @@ from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 _PHASE_COLORS: dict[str, str] = {
     "plan": "yellow",
@@ -52,17 +53,29 @@ class HCodeDisplay:
         label = phase.upper()
         self.console.print(f"[{color}]▶  Phase: {label}[/{color}]")
 
-    def show_result(self, result: str) -> None:
-        """Print the agent's final response in a green panel.
+    def show_result(
+        self,
+        result: str,
+        *,
+        footer: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Print the agent's end-of-turn outcome in a bordered panel.
 
         Args:
-            result: Response text to display.
+            result: Outcome text to display (the model's answer or an action
+                summary — never the plan).
+            footer: Optional dim subtitle line (e.g. ``"PEV · model · 1.2s"``).
+            status: Verify status; ``"issues found"`` paints the border yellow,
+                anything else (incl. ``None``/``"verified"``) stays green.
         """
+        border_style = "yellow" if status == "issues found" else "green"
         self.console.print(
             Panel(
                 result,
                 title="Result",
-                border_style="green",
+                subtitle=Text(footer, style="dim") if footer else None,
+                border_style=border_style,
                 expand=True,
             )
         )

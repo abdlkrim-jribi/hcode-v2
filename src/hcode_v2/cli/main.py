@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -245,6 +246,7 @@ def chat(session: str | None, workdir: str | None) -> None:
                 # C3: stream the turn so the plan and todo progress render
                 # live. Display-only — same invocation semantics as ainvoke.
                 renderer = LiveTurnRenderer(console=display.console, show_todos=show_todos)
+                t0 = time.perf_counter()
                 with renderer:
                     async for event in agent.astream_events(
                         {"messages": [HumanMessage(content=user_input)]},
@@ -261,7 +263,16 @@ def chat(session: str | None, workdir: str | None) -> None:
                         version="v2",
                     ):
                         renderer.process_event(event)
-                display.show_result(renderer.final_text or "(no response)")
+                duration = time.perf_counter() - t0
+                # Result panel shows a REAL outcome (answer or action summary,
+                # never the plan), with an agent·model·duration footer and a
+                # border coloured by the verify verdict.
+                footer = f"PEV · {Config.from_env().model} · {duration:.1f}s"
+                display.show_result(
+                    renderer.result_summary(),
+                    footer=footer,
+                    status=renderer.verify_status,
+                )
             except Exception as exc:  # noqa: BLE001
                 display.show_error(str(exc))
 

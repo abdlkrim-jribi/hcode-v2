@@ -899,8 +899,10 @@ def test_live_final_answer_prefers_execute_text_over_verify_verdict() -> None:
     assert "VERIFIED OK" not in renderer.final_text
     assert "EXECUTION COMPLETE" not in renderer.final_text
     assert renderer.verify_status == "verified"
-    # the verdict shows up as a short status note in the scrollback
-    assert "verified" in console.export_text().lower()
+    # Piece 5: the verdict no longer prints a stray "verified" line mid-stream —
+    # it's surfaced in the Result panel (rendered separately by main.py). So the
+    # turn's scrollback must NOT contain a bare "verified" status line.
+    assert "verified" not in console.export_text().lower()
 
 
 def test_live_verdict_only_run_falls_back_to_stripped_verdict() -> None:
@@ -1285,6 +1287,139 @@ def test_live_edit_error_artifact_renders_no_diff() -> None:
     assert "@@" not in out        # no diff body
     assert "(+0" not in out       # no zero-count noise
     assert "(+0, -0)" not in out
+
+
+# --- Result panel: real outcome, no plan echo, no stray verdict (Piece 5) ----
+#
+# Bugs being fixed:
+#   * final_text fell back to the PLAN echo when execute/verify produced no
+#     usable text -> the Result panel re-printed the plan.
+#   * a truncated marker ("EXEC") survived _strip_markers and showed as the
+#     "answer".
+#   * _on_model_end printed a stray lowercase "verified" line mid-stream.
+#
+# Contract being pinned: result_summary() lives on LiveTurnRenderer and returns
+# the genuine answer if present, else a concise action outcome built from the
+# persisted actions, else the verdict, else a minimal default — NEVER the plan.
+# The footer (agent·model·duration) is assembled in main.py (it needs turn
+# timing there), so it is NOT a renderer method; its content is covered where
+# it's built. The Result panel rendering (body + footer + status colour) is
+# tested via display.show_result below.
+
+
+def test_final_text_never_returns_plan() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        # plan output captured, then a bare execute marker that strips to empty;
+        # no real answer, no verdict.
+        renderer.process_event(_model_end(
+            "1. Use write_file to create app.py 2. Use edit_file to update it\nPLAN COMPLETE"
+        ))
+        renderer.process_event(_model_end("EXECUTION COMPLETE"))
+    assert renderer.final_text == ""  # the plan is NOT the answer
+    summary = renderer.result_summary()
+    assert "write_file" not in summary
+    assert "Use edit_file" not in summary
+
+
+def test_result_summary_uses_answer_when_present() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_model_end("Added the greet function and a test."))
+    assert renderer.result_summary() == "Added the greet function and a test."
+
+
+def test_result_summary_falls_back_to_action_outcome() -> None:
+    # No model answer text — the summary is synthesized from the persisted
+    # actions (verbs + paths), never from the plan.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("write", path="app.py"))
+    renderer.process_event(_tool_end(
+        "write", "Wrote app.py (+3)",
+        artifact={"diff": "--- a/app.py\n+++ b/app.py\n@@ -0,0 +3 @@\n+a\n+b\n+c",
+                  "additions": 3, "deletions": 0, "path": "app.py"},
+    ))
+    renderer.process_event(_tool_start("edit", path="calc.py"))
+    renderer.process_event(_tool_end(
+        "edit", "Edited calc.py (+1, -1)",
+        artifact={"diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-x\n+y",
+                  "additions": 1, "deletions": 1, "path": "calc.py"},
+    ))
+    summary = renderer.result_summary()
+    assert "app.py" in summary and "calc.py" in summary
+    # verbs surfaced (write -> Wrote/Created, edit -> Edited); tolerant on the
+    # write verb wording.
+    assert ("Wrote" in summary) or ("Created" in summary)
+    assert "Edited" in summary
+    # never the plan wording
+    assert "write_file" not in summary and "Use edit_file" not in summary
+
+
+def test_strip_markers_drops_truncated_exec_fragment() -> None:
+    # A truncated execute marker ("EXEC") must not be surfaced as the answer.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    with renderer:
+        renderer.process_event(_model_end("EXEC"))
+    assert "EXEC" not in renderer.final_text
+    assert "EXEC" not in renderer.result_summary()
+
+
+def test_no_stray_verified_line_printed() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_model_end("Everything matches the plan.\nVERIFIED OK"))
+    assert renderer.verify_status == "verified"
+    # the bare "verified" status is no longer printed to the console mid-stream
+    assert "verified" not in console.export_text().lower()
+
+
+# NOTE (test 6 from the plan): the agent·model·duration FOOTER is assembled in
+# main.py (it needs turn timing there), not on the renderer — so there is no
+# renderer footer method to unit-test here. The panel's rendering of a footer
+# string + status colour is covered by test_show_result_renders_footer_and_status.
+
+
+def test_show_result_renders_footer_and_status() -> None:
+    # New signature: show_result(result, *, footer=None, status=None). Body and
+    # footer are rendered; status drives the panel border colour (green for
+    # verified, yellow for issues found). Backward-compatible: no kwargs => the
+    # current plain green panel.
+    from rich.console import Console as RC
+
+    from hcode_v2.cli.display import HCodeDisplay
+
+    captured: list = []
+
+    class _CapConsole:
+        def print(self, renderable, *args, **kwargs) -> None:
+            captured.append(renderable)
+
+    display = HCodeDisplay(console=_CapConsole())
+
+    display.show_result("Body outcome text", footer="PEV · model-x · 1.2s", status="verified")
+    panel = captured[-1]
+    assert "green" in str(panel.border_style)
+    rec = RC(record=True, width=100)
+    rec.print(panel)
+    text = rec.export_text()
+    assert "Body outcome text" in text
+    assert "PEV · model-x · 1.2s" in text
+
+    # issues found -> yellow border
+    captured.clear()
+    display.show_result("Body", footer="PEV · model-x", status="issues found")
+    assert "yellow" in str(captured[-1].border_style)
+
+    # backward compatible: no footer/status still renders the body
+    captured.clear()
+    display.show_result("Just the body")
+    rec2 = RC(record=True, width=100)
+    rec2.print(captured[-1])
+    assert "Just the body" in rec2.export_text()
 
 
 # --- handle_chat_command (chat slash-command dispatch) -----------------------
