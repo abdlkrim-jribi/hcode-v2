@@ -10,6 +10,7 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
+from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 from deepagents.middleware.hcode_skills import HCodeSkillsMiddleware
 from deepagents.middleware.pev import PEVMiddleware
 from deepagents.middleware.safety_guard import SafetyGuardMiddleware
@@ -145,6 +146,17 @@ async def create_hcode_agent(
         middleware.append(SafetyGuardMiddleware())
     middleware.append(HCodeSkillsMiddleware(skills_dir=skills_dir))
     middleware.append(WorkflowMiddleware(workflows_dir=workflows_dir))
+    # Route the model OFF the deepagents builtin mutating file tools and onto
+    # hcode's own edit/write/multi_edit, which return response_format=
+    # "content_and_artifact" so a structured diff flows to the live renderer.
+    # edit_file/write_file are the redundant mutating builtins we replace; the
+    # read-side builtins (read_file/ls/glob/grep) stay — FilesystemMiddleware
+    # scaffolding relies on its read path. Must be appended LAST: it filters
+    # tools at model-call time and has to run after the tool-injecting
+    # middleware (FilesystemMiddleware) to strip the builtins they inject.
+    # NOTE: imports a PRIVATE deepagents symbol (_tool_exclusion) — intentional;
+    # revisit on a deepagents re-vendor if that module path changes.
+    middleware.append(_ToolExclusionMiddleware(excluded=frozenset({"edit_file", "write_file"})))
 
     mcp_tools = []
     manager = MCPClientManager(config_path=mcp_config)
