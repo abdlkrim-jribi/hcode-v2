@@ -13,7 +13,11 @@ on_chat_model_stream  Accumulate tokens. When the PEV "PLAN COMPLETE" marker
 on_tool_start         ``todo_write`` / ``write_todos``: replace the live
                       progress checklist from the tool input. Other tools:
                       show a lightweight "running <tool>" line.
-on_tool_end           Clear the running-tool line.
+on_tool_end           Clear the running-tool line and append a persistent
+                      completed-action feed entry — "✓ <verb> <path>" plus a
+                      coloured inline diff read from the tool's ``.artifact``
+                      (hcode edit/write/multi_edit); read-side tools add just
+                      the action line.
 on_chat_model_end     Collect answer candidates. The user-facing answer is
                       the last real (execute-phase / plain chat) text; a
                       verify verdict (VERIFIED OK / ISSUES FOUND) becomes a
@@ -27,6 +31,7 @@ malformed or unknown event never raises — rendering must not break the turn.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Callable
 
@@ -64,6 +69,46 @@ _STATUS_STYLES: dict[str, tuple[str, str]] = {
     "running": (">", "yellow"),
     "pending": (" ", "dim"),
 }
+
+# Friendly past-tense verb per tool name — covers BOTH the deepagents builtins
+# (read_file/write_file/edit_file/ls, input key "file_path") and hcode's own
+# tools (read/write/edit/multi_edit, input key "path"). Unknown -> the raw name.
+_TOOL_LABELS: dict[str, str] = {
+    "read_file": "Read",
+    "read": "Read",
+    "write_file": "Wrote",
+    "write": "Wrote",
+    "edit_file": "Edited",
+    "edit": "Edited",
+    "multi_edit": "Edited",
+    "ls": "Listed",
+}
+# Completed-action glyph (the app runs with PYTHONIOENCODING=utf-8).
+_DONE_GLYPH = "✓"
+# Cap inline diff lines so a huge edit can't flood the feed.
+_MAX_DIFF_LINES = 40
+
+
+def _relative_path(path: str) -> str:
+    """Display a path relative to the working dir; fall back to the raw path."""
+    try:
+        base = os.environ.get("HCODE_ROOT_DIR") or os.getcwd()
+        return os.path.relpath(path, base)
+    except Exception:  # noqa: BLE001 — display-only, odd/cross-drive paths must not crash
+        return path
+
+
+def _diff_line_style(line: str) -> str:
+    """Rich style for one diff content line (+ green / - red / context dim).
+
+    Header lines (``+++``/``---``/``@@``) are dropped before this is called, so
+    no special-casing for them here.
+    """
+    if line.startswith("+"):
+        return "green"
+    if line.startswith("-"):
+        return "red"
+    return "dim"
 
 
 def _text_from_content(content: Any) -> str:
@@ -133,6 +178,8 @@ class LiveTurnRenderer:
         self._exec_done: bool = False
         self._todos: list[tuple[str, str]] = []
         self._active_tool: str | None = None
+        self._active_path: str | None = None
+        self._feed: list[RenderableType] = []
         self._live: Live | None = None
 
     @property
@@ -170,7 +217,7 @@ class LiveTurnRenderer:
             elif kind == "on_tool_start":
                 self._on_tool_start(name, data)
             elif kind == "on_tool_end":
-                self._on_tool_end()
+                self._on_tool_end(data)
             elif kind == "on_chat_model_end":
                 self._on_model_end(data)
         except Exception:  # noqa: BLE001 — display-only, never break the turn
@@ -179,14 +226,20 @@ class LiveTurnRenderer:
     # ── Rendering ─────────────────────────────────────────────────────────────
 
     def renderable(self) -> RenderableType:
-        """Return the current live region content (checklist + running tool)."""
+        """Return the live region: completed-action feed, running tool, checklist."""
         lines: list[RenderableType] = []
+        # 1) Persistent feed of completed actions (+ any inline diff lines).
+        #    Always shown — actions aren't todos, so the /todos toggle never hides
+        #    them.
+        lines.extend(self._feed)
+        # 2) The tool currently running, if any.
+        if self._active_tool:
+            lines.append(Text(f"running {self._active_tool}...", style="dim"))
+        # 3) The live todo checklist — gated by the /todos toggle.
         if self.show_todos:
             for status, text in self._todos:
                 marker, style = _STATUS_STYLES.get(status, _STATUS_STYLES["pending"])
                 lines.append(Text(f"[{marker}] {text}", style=style))
-        if self._active_tool:
-            lines.append(Text(f"running {self._active_tool}...", style="dim"))
         return Group(*lines) if lines else Text("")
 
     def _refresh(self) -> None:
@@ -227,11 +280,72 @@ class LiveTurnRenderer:
                 self._todos = items
         else:
             self._active_tool = name
+            tool_input = data.get("input")
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            # deepagents builtins use "file_path"; hcode's own tools use "path".
+            path = tool_input.get("file_path") or tool_input.get("path")
+            self._active_path = _relative_path(str(path)) if path else None
         self._refresh()
 
-    def _on_tool_end(self) -> None:
+    def _on_tool_end(self, data: dict) -> None:
+        """Append the finished tool as a persistent feed entry (+ inline diff).
+
+        Todo tools render via the checklist (``_active_tool`` is never set for
+        them), so they add nothing here. Any other tool appends a coloured
+        "✓ <verb> <path>" line that stays visible.
+
+        For hcode's edit/write/multi_edit (``response_format="content_and_artifact"``)
+        the finished ``ToolMessage`` carries ``.artifact ==
+        {diff, additions, deletions, path}``: we read the REAL diff from there
+        (never synthesize), render its +/- lines coloured with the ``+++``/``---``/
+        ``@@`` header lines dropped, and take the counts straight from the
+        artifact. Read-side tools (read_file/ls/…) carry no artifact, so they get
+        a plain action line. Output extraction is tolerant — a missing/odd
+        output or artifact never raises.
+        """
+        tool = self._active_tool
+        if tool is not None:
+            try:
+                output = (data or {}).get("output")
+                artifact = getattr(output, "artifact", None)
+                if not isinstance(artifact, dict):
+                    artifact = None
+                self._append_action(tool, artifact)
+            except Exception:  # noqa: BLE001 — display-only, never break the turn
+                logger.debug("live feed ignored a malformed tool result", exc_info=True)
         self._active_tool = None
+        self._active_path = None
         self._refresh()
+
+    def _append_action(self, tool: str, artifact: dict | None) -> None:
+        """Push a coloured action line (+ optional inline diff) onto the feed."""
+        verb = _TOOL_LABELS.get(tool, tool)
+        artifact_path = artifact.get("path") if artifact else None
+        path = _relative_path(str(artifact_path)) if artifact_path else self._active_path
+        label = f"{_DONE_GLYPH} {verb} {path}" if path else f"{_DONE_GLYPH} {verb}"
+
+        diff = artifact.get("diff") if artifact else None
+        if artifact and diff:
+            additions = artifact.get("additions")
+            deletions = artifact.get("deletions")
+            # Counts come straight from the artifact — never recounted from the
+            # diff text. Suppress an all-zero suffix.
+            if isinstance(additions, int) and isinstance(deletions, int) and (additions or deletions):
+                label += f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
+
+        self._feed.append(Text(label, style="green"))
+
+        if artifact and diff:
+            rendered = 0
+            for line in str(diff).splitlines():
+                if line.startswith(("+++", "---", "@@")):
+                    continue  # drop header noise
+                if rendered >= _MAX_DIFF_LINES:
+                    self._feed.append(Text("… (truncated)", style="dim"))
+                    break
+                self._feed.append(Text(line, style=_diff_line_style(line)))
+                rendered += 1
 
     def _on_model_end(self, data: dict) -> None:
         """Classify each model output by its content markers.

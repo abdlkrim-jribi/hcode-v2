@@ -846,13 +846,21 @@ def test_live_checklist_from_deepagents_write_todos() -> None:
 
 
 def test_live_shows_and_clears_running_tool() -> None:
+    # Piece 4: on_tool_end clears the "running" line AND appends a persistent
+    # completed-action feed line.
     console = RichConsole(record=True, width=100)
     renderer = LiveTurnRenderer(console=console)
-    renderer.process_event({"event": "on_tool_start", "name": "read_file", "data": {"input": {}}})
+    renderer.process_event(
+        {"event": "on_tool_start", "name": "read_file", "data": {"input": {"file_path": "temps.py"}}}
+    )
     assert "running read_file" in _render(renderer, console)
-    renderer.process_event({"event": "on_tool_end", "name": "read_file", "data": {}})
+    renderer.process_event(
+        {"event": "on_tool_end", "name": "read_file", "data": {"output": SimpleNamespace(content="   1: x=1")}}
+    )
     fresh = RichConsole(record=True, width=100)
-    assert "running read_file" not in _render(renderer, fresh)
+    out = _render(renderer, fresh)
+    assert "running read_file" not in out        # running line cleared
+    assert "Read" in out and "temps.py" in out   # completed action persists in the feed
 
 
 def test_live_captures_final_text() -> None:
@@ -981,6 +989,21 @@ def test_live_never_raises_on_malformed_events() -> None:
         {"event": "on_chat_model_end", "data": {}},
         {"event": "on_chat_model_end", "data": {"output": None}},
         {"event": "something_unknown", "data": {"x": 1}},
+        # on_tool_end robustness (Piece 4): artifact extraction must never raise.
+        # No active tool -> safe no-ops:
+        {"event": "on_tool_end", "name": "read_file"},
+        {"event": "on_tool_end", "name": "read_file", "data": {}},
+        # Active tool set first, then odd outputs / artifacts:
+        {"event": "on_tool_start", "name": "edit", "data": {"input": {"path": "x.py"}}},
+        {"event": "on_tool_end", "name": "edit", "data": {"output": None}},
+        {"event": "on_tool_start", "name": "edit", "data": {"input": {"path": "x.py"}}},
+        {"event": "on_tool_end", "name": "edit", "data": {"output": "bare string"}},
+        {"event": "on_tool_start", "name": "edit", "data": {"input": {"path": "x.py"}}},
+        {"event": "on_tool_end", "name": "edit", "data": {"output": {"artifact": {"diff": "x"}}}},
+        {"event": "on_tool_start", "name": "edit", "data": {"input": {"path": "x.py"}}},
+        {"event": "on_tool_end", "name": "edit", "data": {"output": SimpleNamespace(content="c", artifact="not a dict")}},
+        {"event": "on_tool_start", "name": "edit", "data": {"input": {"path": "x.py"}}},
+        {"event": "on_tool_end", "name": "edit", "data": {"output": SimpleNamespace(content="c", artifact={"additions": 1})}},
     ]
     with renderer:
         for event in malformed:
@@ -1005,6 +1028,263 @@ def test_live_show_todos_flag_controls_checklist() -> None:
     shown = LiveTurnRenderer(console=shown_console, show_todos=True)
     shown.process_event(todo_event)
     assert "do it" in _render(shown, shown_console)
+
+
+# --- activity feed + inline diffs (Piece 4) ---------------------------------
+#
+# The feed reads the REAL diff artifact shipped in Piece 3: hcode's
+# edit/write/multi_edit declare response_format="content_and_artifact", so
+# on_tool_end's data["output"] is a ToolMessage-like object exposing
+#   .artifact == {"diff": <str>, "additions": <int>, "deletions": <int>, "path": <str>}
+# The renderer appends a persistent "<glyph> <Verb> <path> (+A, -D)" line per
+# completed tool plus the coloured inline diff (the +++/---/@@ header lines are
+# dropped). Read-side tools (read_file/ls/…) carry NO artifact -> just the action
+# line. Counts come from the artifact, NOT recomputed from the diff text.
+
+
+def _tool_start(name: str, **tool_input) -> dict:
+    return {"event": "on_tool_start", "name": name, "data": {"input": dict(tool_input)}}
+
+
+def _tool_end(name: str, content: str = "", artifact: dict | None = None) -> dict:
+    # artifact None -> output has NO .artifact attr (a read-side tool); otherwise
+    # the ToolMessage-like output carries the structured diff artifact.
+    output = (
+        SimpleNamespace(content=content)
+        if artifact is None
+        else SimpleNamespace(content=content, artifact=artifact)
+    )
+    return {"event": "on_tool_end", "name": name, "data": {"output": output}}
+
+
+def test_live_write_shows_wrote_action_from_artifact() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("write", path="temps.py"))
+    renderer.process_event(_tool_end(
+        "write",
+        "Wrote temps.py (+1)",
+        artifact={
+            "diff": "--- a/temps.py\n+++ b/temps.py\n@@ -0,0 +1 @@\n+x = 1",
+            "additions": 1,
+            "deletions": 0,
+            "path": "temps.py",
+        },
+    ))
+    out = _render(renderer, console)
+    assert "Wrote" in out
+    assert "temps.py" in out
+    assert "(+1)" in out                 # deletions == 0 -> just "(+1)"
+    assert "x = 1" in out                # the added content line is shown
+    assert "@@" not in out               # header lines dropped
+    assert "+++" not in out
+    assert "---" not in out
+
+
+def test_live_edit_renders_diff_from_artifact() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("edit", path="calc.py"))
+    renderer.process_event(_tool_end(
+        "edit",
+        "Edited calc.py (+1, -1)",
+        artifact={
+            "diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-    return x * 2\n+    return x * 3",
+            "additions": 1,
+            "deletions": 1,
+            "path": "calc.py",
+        },
+    ))
+    out = _render(renderer, console)
+    assert "Edited" in out
+    assert "calc.py" in out
+    assert "(+1, -1)" in out
+    assert "return x * 2" in out         # removed line content
+    assert "return x * 3" in out         # added line content
+    assert "@@" not in out
+    assert "+++" not in out
+    assert "---" not in out
+
+
+def test_live_multi_edit_uses_artifact() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("multi_edit", path="multi.py"))
+    renderer.process_event(_tool_end(
+        "multi_edit",
+        "Edited multi.py (+2, -2)",
+        artifact={
+            "diff": (
+                "--- a/multi.py\n+++ b/multi.py\n@@ -1,3 +1,3 @@\n"
+                "-line one\n+LINE ONE\n keep me\n-line three\n+LINE THREE"
+            ),
+            "additions": 2,
+            "deletions": 2,
+            "path": "multi.py",
+        },
+    ))
+    out = _render(renderer, console)
+    assert "Edited" in out
+    assert "multi.py" in out
+    assert "LINE ONE" in out
+    assert "LINE THREE" in out
+    assert "@@" not in out
+
+
+def test_live_read_no_artifact_just_action_line() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("read_file", file_path="temps.py"))
+    renderer.process_event(_tool_end("read_file", "   1: x=1"))  # NO artifact
+    out = _render(renderer, console)
+    assert "Read" in out
+    assert "temps.py" in out
+    assert "@@" not in out                # no diff
+    assert "(+" not in out                # no counts for a read
+
+
+def test_live_ls_listed() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("ls", path="src"))
+    renderer.process_event(_tool_end("ls", "src/app.py\nsrc/util.py"))  # NO artifact
+    out = _render(renderer, console)
+    assert "Listed" in out
+    assert "src" in out
+
+
+def test_live_feed_accumulates_in_order() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("write", path="temps.py"))
+    renderer.process_event(_tool_end(
+        "write", "Wrote temps.py (+1)",
+        artifact={"diff": "--- a/temps.py\n+++ b/temps.py\n@@ -0,0 +1 @@\n+x = 1",
+                  "additions": 1, "deletions": 0, "path": "temps.py"},
+    ))
+    renderer.process_event(_tool_start("edit", path="calc.py"))
+    renderer.process_event(_tool_end(
+        "edit", "Edited calc.py (+1, -1)",
+        artifact={"diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-old line\n+new line",
+                  "additions": 1, "deletions": 1, "path": "calc.py"},
+    ))
+    out = _render(renderer, console)
+    # both present (asserted before the index check so a missing token fails
+    # cleanly instead of raising ValueError)...
+    assert "Wrote" in out and "Edited" in out
+    assert "temps.py" in out and "calc.py" in out
+    # ...write before edit (neither verb/diff contains the other's verb token).
+    assert out.lower().index("wrote") < out.lower().index("edited")
+
+
+def test_live_diff_drops_header_lines() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("edit", path="x.py"))
+    renderer.process_event(_tool_end(
+        "edit", "Edited x.py (+1, -1)",
+        artifact={
+            "diff": "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n+added\n-removed",
+            "additions": 1, "deletions": 1, "path": "x.py",
+        },
+    ))
+    out = _render(renderer, console)
+    # the three header forms must NOT leak into the feed (the noise bug)...
+    assert "--- a/x" not in out
+    assert "+++ b/x" not in out
+    assert "@@ -1,3 +1,3 @@" not in out
+    assert "@@" not in out
+    # ...but the real +/- content does.
+    assert "added" in out
+    assert "removed" in out
+
+
+def test_live_diff_capped() -> None:
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    diff = "\n".join(
+        ["--- a/big.py", "+++ b/big.py", "@@ -0,0 +60 @@"]
+        + [f"+line{i}" for i in range(60)]
+    )
+    renderer.process_event(_tool_start("write", path="big.py"))
+    renderer.process_event(_tool_end(
+        "write", "Wrote big.py (+60)",
+        artifact={"diff": diff, "additions": 60, "deletions": 0, "path": "big.py"},
+    ))
+    out = _render(renderer, console)
+    assert "line0" in out                                  # early lines rendered
+    assert "line55" not in out                             # tail truncated (cap ~40)
+    assert "truncated" in out.lower() or "…" in out        # truncation marker shown
+
+
+def test_live_counts_come_from_artifact() -> None:
+    # The artifact's counts are authoritative — they must NOT be recomputed from
+    # the diff text. Here the diff has 1 add / 1 del but the artifact says 7 / 3.
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("edit", path="c.py"))
+    renderer.process_event(_tool_end(
+        "edit", "Edited c.py (+7, -3)",
+        artifact={
+            "diff": "--- a/c.py\n+++ b/c.py\n@@ -1 +1 @@\n+only one added\n-only one removed",
+            "additions": 7, "deletions": 3, "path": "c.py",
+        },
+    ))
+    out = _render(renderer, console)
+    assert "(+7, -3)" in out         # from the artifact
+    assert "(+1, -1)" not in out     # NOT recomputed from the diff
+
+
+def test_live_feed_coexists_with_show_todos() -> None:
+    edit_start = _tool_start("edit", path="calc.py")
+    edit_end = _tool_end(
+        "edit", "Edited calc.py (+1, -1)",
+        artifact={"diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-a\n+b",
+                  "additions": 1, "deletions": 1, "path": "calc.py"},
+    )
+    todo_event = {
+        "event": "on_tool_start",
+        "name": "write_todos",
+        "data": {"input": {"todos": [{"content": "do it", "status": "pending"}]}},
+    }
+
+    # show_todos=True -> both the completed action and the checklist render.
+    shown_console = RichConsole(record=True, width=100)
+    shown = LiveTurnRenderer(console=shown_console, show_todos=True)
+    shown.process_event(edit_start)
+    shown.process_event(edit_end)
+    shown.process_event(todo_event)
+    shown_out = _render(shown, shown_console)
+    assert "Edited" in shown_out and "calc.py" in shown_out
+    assert "do it" in shown_out
+
+    # show_todos=False -> checklist hidden, but the feed action STILL shows
+    # (the feed is independent of the /todos toggle).
+    hidden_console = RichConsole(record=True, width=100)
+    hidden = LiveTurnRenderer(console=hidden_console, show_todos=False)
+    hidden.process_event(edit_start)
+    hidden.process_event(edit_end)
+    hidden.process_event(todo_event)
+    hidden_out = _render(hidden, hidden_console)
+    assert "do it" not in hidden_out
+    assert "Edited" in hidden_out and "calc.py" in hidden_out
+
+
+def test_live_edit_error_artifact_renders_no_diff() -> None:
+    # An error-path artifact carries diff="" and 0/0 counts: the feed shows just
+    # the action line — no diff body, and no noisy "(+0, -0)".
+    console = RichConsole(record=True, width=100)
+    renderer = LiveTurnRenderer(console=console)
+    renderer.process_event(_tool_start("edit", path="x.py"))
+    renderer.process_event(_tool_end(
+        "edit", "Error: old_string not found in x.py",
+        artifact={"diff": "", "additions": 0, "deletions": 0, "path": "x.py"},
+    ))
+    out = _render(renderer, console)
+    assert "x.py" in out          # the action line still names the file
+    assert "@@" not in out        # no diff body
+    assert "(+0" not in out       # no zero-count noise
+    assert "(+0, -0)" not in out
 
 
 # --- handle_chat_command (chat slash-command dispatch) -----------------------
