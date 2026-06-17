@@ -33,7 +33,8 @@ from hcode_v2.tools.files import _EditOperation, edit, multi_edit, write
 # headers). Assertions below lean on that actual format, kept tolerant.
 
 
-def test_edit_returns_diff_artifact(tmp_path: Path) -> None:
+def test_edit_returns_diff_artifact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))  # anchor root so tmp is in-root
     target = tmp_path / "calc.py"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
 
@@ -57,7 +58,8 @@ def test_edit_returns_diff_artifact(tmp_path: Path) -> None:
     assert artifact["path"].endswith("calc.py")
 
 
-def test_write_returns_artifact(tmp_path: Path) -> None:
+def test_write_returns_artifact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))  # anchor root so tmp is in-root
     target = tmp_path / "new_module.py"  # brand-new file
     body = "one\ntwo\nthree\n"  # 3 lines written
 
@@ -75,7 +77,8 @@ def test_write_returns_artifact(tmp_path: Path) -> None:
     assert artifact["path"].endswith("new_module.py")
 
 
-def test_multi_edit_returns_artifact(tmp_path: Path) -> None:
+def test_multi_edit_returns_artifact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))  # anchor root so tmp is in-root
     target = tmp_path / "multi.py"
     target.write_text("line one\nkeep me\nline three\n", encoding="utf-8")
 
@@ -163,10 +166,64 @@ def test_edit_leading_slash_path_stays_in_root(tmp_path: Path, monkeypatch) -> N
 
 
 def test_real_absolute_path_respected(tmp_path: Path, monkeypatch) -> None:
-    # A genuine OS-absolute path is still used verbatim (not re-rooted): the
-    # hardening only re-homes leading-slash/relative paths.
+    # A genuine OS-absolute path INSIDE the working dir is used verbatim (not
+    # re-rooted): the hardening re-homes leading-slash/relative paths and
+    # contains/rejects out-of-root paths, but honors in-root absolutes.
     monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
     target = tmp_path / "abs.py"
-    write.func(path=str(target), content="a = 0\n")  # str(target) is absolute
+    write.func(path=str(target), content="a = 0\n")  # str(target) is absolute, in-root
     assert target.is_file()
     assert target.read_text(encoding="utf-8") == "a = 0\n"
+
+
+# --- path containment: never escape the working dir (cross-platform) --------
+#
+# The unified rule: _resolve_path re-homes leading-slash paths under root on ALL
+# OSes (covered above), and must REFUSE to write outside the working dir —
+# ".." traversal and out-of-root absolutes are rejected or contained, never
+# allowed to escape. These tests encode that invariant guard-free so they hold
+# on Linux CI and Windows alike. ".."-backslash variants only traverse on
+# Windows natively, but the resolver normalizes "\\"→"/", so the rule rejects
+# them on both OSes too.
+
+
+def test_dotdot_traversal_rejected(tmp_path: Path, monkeypatch) -> None:
+    # Root is a nested subdir so the escape target lives INSIDE this test's own
+    # tmp_path (auto-cleaned, never the shared pytest base that other runs pollute).
+    root = tmp_path / "a" / "b"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(root))
+    # "../../escape.py" from <tmp>/a/b climbs exactly to <tmp>/escape.py.
+    sentinel = tmp_path / "escape.py"
+    assert not sentinel.exists()  # clean before
+
+    for hostile in ("../../escape.py", "..\\..\\escape.py"):
+        result = write.func(path=hostile, content="x = 1\n")
+        # write returns (content, artifact); the rejection rides in the content.
+        assert isinstance(result, tuple)
+        assert "escapes the working directory" in result[0], (
+            f"traversal not rejected: {hostile!r} -> {result[0]!r}"
+        )
+    # the rejected writes created nothing at the (in-tmp_path) escape target
+    assert not sentinel.exists(), "a '..' write escaped above the working dir"
+
+
+def test_absolute_outside_root_contained_or_rejected(tmp_path: Path, monkeypatch) -> None:
+    # Security INVARIANT (guard-free, both OSes): a hostile out-of-root absolute
+    # must NEVER create a file outside the working dir — it is either rejected or
+    # re-homed (contained) under root. Root is a subdir so the "outside" target
+    # lives INSIDE this test's own tmp_path (not a shared parent dir).
+    root = tmp_path / "wd"
+    root.mkdir()
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(root))
+    outside = tmp_path / "outside_probe.py"  # a sibling of root, outside root
+    assert not outside.exists()  # clean before
+
+    result = write.func(path=str(outside), content="x = 1\n")
+
+    # 1) nothing landed at the outside-root location
+    assert not outside.exists(), "write escaped to an outside-root absolute path"
+    # 2) either rejected with the escape error, OR contained somewhere under root
+    rejected = isinstance(result, tuple) and "escapes the working directory" in result[0]
+    contained = any(p.is_file() for p in root.rglob("*"))
+    assert rejected or contained

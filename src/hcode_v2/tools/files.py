@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 import fnmatch
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Optional
 
 from langchain_core.tools import tool
@@ -14,6 +14,10 @@ from pydantic import BaseModel
 from hcode_v2.tools.base import get_root_dir
 
 _MAX_READ_LINES = 800
+
+
+class PathEscapeError(ValueError):
+    """A tool path resolves outside the working directory."""
 
 
 def _diff_counts(diff_lines: List[str]) -> tuple[int, int]:
@@ -33,19 +37,44 @@ def _diff_artifact(diff: str, additions: int, deletions: int, path: str) -> dict
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a tool path argument to a real filesystem path.
+    """Resolve a tool path argument to a real filesystem path, contained in root.
 
-    A genuine OS-absolute path (a drive-qualified path on Windows, or a real
-    POSIX absolute path) is honored verbatim. A leading-slash/backslash path
-    that is rooted but driveless on Windows (e.g. ``/app.py`` from a model under
-    ``virtual_mode=False``) is treated as ROOT-RELATIVE: the leading separators
-    are stripped and the remainder joined under :func:`get_root_dir`, so it lands
-    INSIDE the working dir instead of collapsing to the drive root. Normal
-    relative paths are joined under the working dir unchanged.
+    Unified, cross-platform rule (root is :func:`get_root_dir`, resolved):
+
+    * A genuine OS-absolute path that already sits INSIDE root is honored as-is
+      (e.g. ``<root>/sub/x.py`` given absolutely).
+    * A leading-slash/backslash path (``/app.py``, ``\\app.py``) — and a POSIX
+      absolute that lands outside root — is treated as ROOT-RELATIVE: the
+      anchor/leading separators are stripped and the remainder joined under
+      root, so it lands INSIDE the working dir on every OS (not the drive root
+      on Windows, not the filesystem root on Linux).
+    * A real Windows drive/UNC absolute pointing OUTSIDE root is rejected.
+    * Any path that would escape root via ``..`` traversal is rejected.
+
+    Raises:
+        PathEscapeError: if the path resolves outside the working directory.
     """
-    if Path(path).is_absolute():
-        return Path(path)
-    return get_root_dir() / path.lstrip("/\\")
+    root = get_root_dir().resolve()
+    p = Path(path)
+    if p.is_absolute():
+        candidate = p.resolve()
+        if candidate == root or candidate.is_relative_to(root):
+            return candidate  # in-root absolute → honor as-is
+        # Absolute OUTSIDE root:
+        if PureWindowsPath(path).drive:
+            # real Windows drive/UNC anchor (e.g. C:\Windows, \\srv\share) → reject
+            raise PathEscapeError(path)
+        # POSIX-absolute / leading-slash "virtual root" → re-home under root
+        cleaned = path.replace("\\", "/").lstrip("/")
+    else:
+        # relative OR leading-slash/backslash driveless → root-relative
+        cleaned = path.replace("\\", "/").lstrip("/")
+
+    candidate = (root / cleaned).resolve()
+    # Universal containment guard — catches every ".." escape on both OSes.
+    if candidate != root and not candidate.is_relative_to(root):
+        raise PathEscapeError(path)
+    return candidate
 
 
 @tool
@@ -57,7 +86,10 @@ def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = 
         start_line: First line to include (1-based, inclusive).
         end_line: Last line to include (1-based, inclusive).
     """
-    target = _resolve_path(path)
+    try:
+        target = _resolve_path(path)
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}"
     if not target.exists():
         return f"Error: file not found: {path}"
     try:
@@ -85,7 +117,10 @@ def write(path: str, content: str, append: bool = False) -> tuple[str, dict]:
         content: Text to write.
         append: If True, append instead of overwrite.
     """
-    target = _resolve_path(path)
+    try:
+        target = _resolve_path(path)
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}", _diff_artifact("", 0, 0, path)
     # Capture the prior content (if any) so an overwrite shows a real diff; a
     # brand-new file diffs against empty (every line is an addition).
     try:
@@ -125,7 +160,10 @@ def edit(path: str, old_string: str, new_string: str) -> tuple[str, dict]:
         old_string: Exact text to find and replace.
         new_string: Replacement text.
     """
-    target = _resolve_path(path)
+    try:
+        target = _resolve_path(path)
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}", _diff_artifact("", 0, 0, path)
     if not target.exists():
         return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:
@@ -182,7 +220,10 @@ def _multi_edit_fn(path: str, edits: List[_EditOperation]) -> tuple[str, dict]:
         path: Relative or absolute path to the file.
         edits: List of {old_string, new_string} operations applied in order.
     """
-    target = _resolve_path(path)
+    try:
+        target = _resolve_path(path)
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}", _diff_artifact("", 0, 0, path)
     if not target.exists():
         return f"Error: file not found: {path}", _diff_artifact("", 0, 0, path)
     try:
