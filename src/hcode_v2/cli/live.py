@@ -56,12 +56,31 @@ _VERDICT_ISSUES = "ISSUES FOUND"
 _ALL_MARKERS = (_PLAN_MARKER, _EXEC_MARKER, _VERDICT_OK, _VERDICT_ISSUES)
 
 
+def _is_marker_fragment(line: str) -> bool:
+    """True if ``line`` (alone) is a truncated PEV marker, e.g. "EXEC".
+
+    A fragment is a non-trivial (len>=3) case-insensitive PREFIX of some known
+    marker — what's left when the model hits ``max_tokens`` mid-marker. The
+    whole-line check keeps it conservative: real prose like "execute the plan"
+    is multiple words and won't equal a marker prefix, so it's never nuked.
+    """
+    token = line.strip().upper()
+    if len(token) < 3:
+        return False
+    return any(marker.upper().startswith(token) for marker in _ALL_MARKERS)
+
+
 def _strip_markers(text: str) -> str:
     """Remove PEV protocol markers from user-facing text, tidying blank lines."""
     for marker in _ALL_MARKERS:
         text = re.sub(re.escape(marker), "", text, flags=re.IGNORECASE)
-    lines = [line.rstrip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line.strip()).strip()
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    # Drop a truncated marker fragment left alone on the final line (the model
+    # was cut off mid-"EXECUTION COMPLETE" -> "EXEC"). Only the last line, only
+    # when the whole line is a marker prefix — never mid-prose.
+    if lines and _is_marker_fragment(lines[-1]):
+        lines.pop()
+    return "\n".join(lines).strip()
 
 # checklist marker + style per normalized status (ASCII-safe for Windows consoles)
 _STATUS_STYLES: dict[str, tuple[str, str]] = {
@@ -87,6 +106,9 @@ _TOOL_LABELS: dict[str, str] = {
 _DONE_GLYPH = "✓"
 # Cap inline diff lines so a huge edit can't flood the feed.
 _MAX_DIFF_LINES = 40
+# Verbs that count as a file mutation for the end-of-turn outcome summary
+# (read/ls actions are shown only when there are no mutations).
+_MUTATION_VERBS: frozenset[str] = frozenset({"Wrote", "Created", "Edited"})
 
 
 def _relative_path(path: str) -> str:
@@ -180,12 +202,61 @@ class LiveTurnRenderer:
         self._active_tool: str | None = None
         self._active_path: str | None = None
         self._feed: list[RenderableType] = []
+        # Structured record of completed actions for the end-of-turn outcome
+        # summary: (verb, path, additions, deletions).
+        self._actions: list[tuple[str, str | None, int | None, int | None]] = []
         self._live: Live | None = None
 
     @property
     def final_text(self) -> str:
-        """User-facing answer: real text first, then stripped verdict, then plan."""
-        return self._answer_text or self._verdict_text or self._plan_echo_text
+        """User-facing answer: real execute/chat text first, else the stripped
+        verdict. NEVER the plan echo — the plan has its own panel and is captured
+        only so it isn't misclassified as an answer.
+        """
+        return self._answer_text or self._verdict_text
+
+    def result_summary(self) -> str:
+        """The end-of-turn outcome for the Result panel.
+
+        Priority: the model's genuine answer if it produced one; else a concise
+        outcome synthesized from the completed actions (e.g.
+        ``"Wrote app.py (+3) · Edited calc.py (+1, -1)"``); else the verify
+        verdict; else a minimal ``"Done."``. Never the plan echo.
+        """
+        if self._answer_text.strip():
+            return self._answer_text.strip()
+        if self._actions:
+            summary = self._summarize_actions()
+            if summary:
+                return summary
+        if self._verdict_text.strip():
+            return self._verdict_text.strip()
+        return "Done."
+
+    def _summarize_actions(self) -> str:
+        """One-line outcome from ``self._actions``: mutations if any, else all.
+
+        Repeats of the same path collapse to one entry (latest verb/counts,
+        first-seen order). Counts are shown only when both are present and not
+        both zero — the same suppression rule as the feed.
+        """
+        mutations = [a for a in self._actions if a[0] in _MUTATION_VERBS]
+        chosen = mutations or self._actions
+        by_key: dict[str, tuple[str, str | None, int | None, int | None]] = {}
+        order: list[str] = []
+        for verb, path, adds, dels in chosen:
+            key = path or verb
+            if key not in by_key:
+                order.append(key)
+            by_key[key] = (verb, path, adds, dels)
+        parts: list[str] = []
+        for key in order:
+            verb, path, adds, dels = by_key[key]
+            label = f"{verb} {path}" if path else verb
+            if adds is not None and dels is not None and (adds or dels):
+                label += f" (+{adds})" if dels == 0 else f" (+{adds}, -{dels})"
+            parts.append(label)
+        return " · ".join(parts)
 
     # ── Context manager (Live lifecycle) ────────────────────────────────────
 
@@ -323,18 +394,23 @@ class LiveTurnRenderer:
         verb = _TOOL_LABELS.get(tool, tool)
         artifact_path = artifact.get("path") if artifact else None
         path = _relative_path(str(artifact_path)) if artifact_path else self._active_path
+        # Counts come straight from the artifact — never recounted from the diff.
+        additions = artifact.get("additions") if artifact else None
+        deletions = artifact.get("deletions") if artifact else None
+        if not isinstance(additions, int):
+            additions = None
+        if not isinstance(deletions, int):
+            deletions = None
+
         label = f"{_DONE_GLYPH} {verb} {path}" if path else f"{_DONE_GLYPH} {verb}"
 
         diff = artifact.get("diff") if artifact else None
-        if artifact and diff:
-            additions = artifact.get("additions")
-            deletions = artifact.get("deletions")
-            # Counts come straight from the artifact — never recounted from the
-            # diff text. Suppress an all-zero suffix.
-            if isinstance(additions, int) and isinstance(deletions, int) and (additions or deletions):
-                label += f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
+        if artifact and diff and additions is not None and deletions is not None and (additions or deletions):
+            label += f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
 
         self._feed.append(Text(label, style="green"))
+        # Structured record for the end-of-turn outcome summary.
+        self._actions.append((verb, path, additions, deletions))
 
         if artifact and diff:
             rendered = 0
@@ -363,10 +439,9 @@ class LiveTurnRenderer:
 
         if _VERDICT_OK in upper or _VERDICT_ISSUES in upper:
             status = "verified" if _VERDICT_OK in upper else "issues found"
-            if self.verify_status != status:
-                self.verify_status = status
-                style = "green" if status == "verified" else "yellow"
-                self.console.print(Text(status, style=f"dim {style}"))
+            # Record the verdict structurally (used to colour the Result panel);
+            # do NOT print a stray status line mid-stream.
+            self.verify_status = status
             self._verdict_text = _strip_markers(text)
         elif _PLAN_MARKER in upper:
             # Plan echo — already rendered in the Plan panel above.
