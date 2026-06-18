@@ -38,6 +38,8 @@ import click
 from langchain_core.messages import HumanMessage
 from rich.markup import escape
 
+from deepagents.middleware.task_classifier import TaskClassifier
+
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.banner import render_banner, render_welcome, render_welcome_help
 from hcode_v2.cli.completion import CHAT_COMMANDS, build_chat_session
@@ -45,6 +47,19 @@ from hcode_v2.cli.live import LiveTurnRenderer
 from hcode_v2.cli.display import HCodeDisplay
 from hcode_v2.cli.statusline import render_status
 from hcode_v2.utils.config import Config
+
+
+def _phase_label(phase: str) -> str:
+    """Honest mode label for the Result footer: the full Plan-Execute-Verify
+    cycle shows ``"PEV"``; trivial/fast single-pass turns show their real phase.
+    """
+    return "PEV" if phase == "plan" else phase
+
+
+def _enable_pev(no_pev: bool, fast: bool) -> bool:
+    """``--no-pev`` or ``--fast`` both disable the Plan-Execute-Verify loop
+    (one-shot)."""
+    return not (no_pev or fast)
 
 _VERSION = "HCode v2.0.0 — powered by DeepAgents + LangGraph"
 
@@ -156,11 +171,9 @@ def cli(ctx: click.Context) -> None:
 def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
     """Run a single TASK and print the result."""
     _validate_workdir(workdir)
-
-    if fast:
-        task = "/fast " + task
-
-    _run_agent_task(task, workdir, enable_pev=not no_pev)
+    # --fast (and --no-pev) disable the Plan-Execute-Verify loop -> one-shot.
+    # The task text is sent clean (no marker prefix).
+    _run_agent_task(task, workdir, enable_pev=_enable_pev(no_pev, fast))
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +220,10 @@ def chat(session: str | None, workdir: str | None) -> None:
 
         while True:
             # Persistent-feel status line: re-rendered just above each prompt.
-            # chat always runs the PEV loop; context% is not yet exposed here.
-            display.console.print(render_status(mode="PEV", workdir=workdir))
+            # No hardcoded mode label here — the per-turn mode isn't known until
+            # the input is classified, so the honest phase is shown in the Result
+            # footer instead (see _phase_label below).
+            display.console.print(render_status(workdir=workdir))
             try:
                 user_input = (await prompt_session.prompt_async("you> ")).strip()
             except (EOFError, KeyboardInterrupt):
@@ -265,9 +280,12 @@ def chat(session: str | None, workdir: str | None) -> None:
                         renderer.process_event(event)
                 duration = time.perf_counter() - t0
                 # Result panel shows a REAL outcome (answer or action summary,
-                # never the plan), with an agent·model·duration footer and a
-                # border coloured by the verify verdict.
-                footer = f"PEV · {Config.from_env().model} · {duration:.1f}s"
+                # never the plan), with an honest <phase>·model·duration footer
+                # and a border coloured by the verify verdict. The phase is the
+                # same classification the PEV middleware applies to this input
+                # (plan -> "PEV"; trivial/fast show as-is).
+                phase = TaskClassifier().get_initial_phase(user_input)
+                footer = f"{_phase_label(phase)} · {Config.from_env().model} · {duration:.1f}s"
                 display.show_result(
                     renderer.result_summary(),
                     footer=footer,
@@ -575,6 +593,16 @@ def handle_chat_command(cmd: str, ctx) -> ChatCommandResult:
             p.stem for p in Path(".hcode/workflows").glob("*.md")
         ] if Path(".hcode/workflows").is_dir() else []
         HCodeDisplay(ctx.console).show_workflows(workflows)
+        return ChatCommandResult(handled=True)
+    if name == "/fast":
+        # Informational only — chat auto-detects simple tasks as fast mode, so a
+        # "/fast ..." prefix is unnecessary (and must NOT be forwarded to the
+        # agent as task text). One-shot mode is a run-command flag.
+        ctx.console.print(
+            "[yellow]Simple tasks are auto-detected as fast mode — no /fast prefix "
+            "needed.[/yellow]\n[dim]To force one-shot mode for a single task, use "
+            "`hcode run --fast \"<task>\"`.[/dim]"
+        )
         return ChatCommandResult(handled=True)
     return ChatCommandResult(handled=False)
 

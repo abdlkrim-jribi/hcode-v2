@@ -1616,3 +1616,79 @@ def test_chat_cmd_unknown_falls_through(tmp_path: Path) -> None:
     result = handle_chat_command("/bogus", ctx)
     # not handled -> the loop sends the raw text to the agent (today's behavior)
     assert result.handled is False
+
+
+# --- honest mode display + working /fast (mode-honesty fix) ------------------
+#
+# (A) The Result footer must show the REAL classified phase, not a hardcoded
+#     "PEV". main.py computes phase = TaskClassifier().get_initial_phase(input)
+#     and labels it via _phase_label: "plan" -> "PEV" (the full cycle), else the
+#     phase name verbatim (trivial/fast) so simple turns read honestly.
+# (B) `run --fast` must map to enable_pev=False (one-shot, no PEV) instead of the
+#     inert "/fast " prefix that nothing parses. _enable_pev(no_pev, fast) owns
+#     the mapping.
+# (C) In chat, a "/fast ..." line must be handled gracefully (NOT leaked to the
+#     agent as task text): explain that simple tasks are auto-detected and --fast
+#     is a run-mode flag.
+
+
+def test_phase_label_plan_shows_pev() -> None:
+    assert cli_main._phase_label("plan") == "PEV"
+
+
+def test_phase_label_trivial() -> None:
+    assert cli_main._phase_label("trivial") == "trivial"
+
+
+def test_phase_label_fast() -> None:
+    assert cli_main._phase_label("fast") == "fast"
+
+
+def test_phase_label_reflects_classifier_for_trivial_input() -> None:
+    # the footer pipeline: classify the input, then label it. A "list ..." lookup
+    # classifies trivial -> the footer shows "trivial", not "PEV".
+    from deepagents.middleware.task_classifier import TaskClassifier
+
+    phase = TaskClassifier().get_initial_phase("list issues")
+    assert phase == "trivial"
+    assert cli_main._phase_label(phase) == "trivial"
+
+
+def test_enable_pev_map() -> None:
+    # default -> PEV on; either --no-pev or --fast -> PEV off (one-shot).
+    assert cli_main._enable_pev(no_pev=False, fast=False) is True
+    assert cli_main._enable_pev(no_pev=True, fast=False) is False
+    assert cli_main._enable_pev(no_pev=False, fast=True) is False
+    assert cli_main._enable_pev(no_pev=True, fast=True) is False
+
+
+def test_run_fast_disables_pev_and_no_prefix(monkeypatch) -> None:
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["run", "do something", "--fast"])
+    assert result.exit_code == 0, result.output
+    # --fast -> PEV disabled, and the task text is sent clean (no "/fast " prefix)
+    assert captured["kwargs"].get("enable_pev") is False
+    assert "/fast" not in captured["task"]
+    assert captured["task"] == "do something"
+
+
+def test_run_default_enables_pev(monkeypatch) -> None:
+    # regression guard: plain `run` keeps PEV on and the task unchanged.
+    captured = _patch_capture(monkeypatch)
+    result = runner.invoke(cli, ["run", "do something"])
+    assert result.exit_code == 0, result.output
+    assert captured["kwargs"].get("enable_pev") is True
+    assert captured["task"] == "do something"
+
+
+def test_chat_fast_prefix_not_forwarded(tmp_path: Path) -> None:
+    from hcode_v2.cli.main import handle_chat_command
+
+    ctx = _chat_ctx(tmp_path)
+    result = handle_chat_command("/fast do something", ctx)
+    # handled here -> NOT forwarded to the agent as "/fast ..." task text
+    assert result.handled is True
+    out = ctx.console.export_text().lower()
+    # message explains auto-detection / that --fast is a run-mode flag
+    assert "fast" in out
+    assert "auto" in out or "run" in out
