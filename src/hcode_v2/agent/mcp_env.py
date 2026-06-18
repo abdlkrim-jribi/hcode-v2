@@ -24,6 +24,22 @@ import os
 from deepagents.mcp.client import KNOWN_SERVERS, MCPClient, MCPServerConfig
 
 
+class _ArgCleaningMCPClient(MCPClient):
+    """MCPClient that omits None-valued arguments before calling a tool.
+
+    langchain materializes every unset optional as None (via model_dump on the
+    bridge's args_schema) and the bridge forwards the whole dict to call_tool —
+    so an MCP server's zod schema sees ``{direction: null, ...}`` and rejects it.
+    Stripping None-valued keys sends those optionals ABSENT, which is what the
+    schema wants. Only None is dropped; falsy-but-set values (``0``, ``""``,
+    ``False``) are kept (they're real values the model chose).
+    """
+
+    async def call_tool(self, tool_name, arguments):
+        cleaned = {k: v for k, v in arguments.items() if v is not None}
+        return await super().call_tool(tool_name, cleaned)
+
+
 def resolve_server_env(server_id: str, config_env: dict) -> dict:
     """Fill a server's env with its required vars from ``os.environ``.
 
@@ -52,20 +68,23 @@ def resolve_server_env(server_id: str, config_env: dict) -> dict:
 
 
 def env_injecting_client_factory(config: MCPServerConfig) -> MCPClient:
-    """``MCPClientManager`` ``_client_factory`` hook with secret injection.
+    """``MCPClientManager`` ``_client_factory`` hook: secret injection + arg cleaning.
 
-    Builds an :class:`MCPClient` whose ``config.env`` has the server's required
-    secrets injected from ``os.environ``, without mutating the input ``config``
-    or touching ``libs/deepagents``. Constructing the client does not connect
-    (no subprocess is spawned until ``connect()``).
+    Builds a client that (1) has the server's required secrets injected into
+    ``config.env`` from ``os.environ`` (see :func:`resolve_server_env`), and
+    (2) strips None-valued arguments before each tool call (see
+    :class:`_ArgCleaningMCPClient`) so unset optionals are sent ABSENT rather
+    than as ``null``. Neither behavior mutates the input ``config`` or touches
+    ``libs/deepagents``. Constructing the client does not connect (no subprocess
+    is spawned until ``connect()``).
 
     Args:
         config: The per-server config the manager loaded from the MCP config file.
 
     Returns:
-        An :class:`MCPClient` ready to connect with the injected env.
+        An :class:`_ArgCleaningMCPClient` ready to connect with the injected env.
     """
     merged = resolve_server_env(config.server_id, config.env)
-    return MCPClient(
+    return _ArgCleaningMCPClient(
         MCPServerConfig(config.server_id, config.command, config.args, merged)
     )

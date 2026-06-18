@@ -25,7 +25,10 @@ These FAIL now: ``hcode_v2.agent.mcp_env`` does not exist yet (ImportError).
 
 from __future__ import annotations
 
-from deepagents.mcp.client import MCPServerConfig
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from deepagents.mcp.client import MCPClient, MCPServerConfig
 
 from hcode_v2.agent.mcp_env import env_injecting_client_factory, resolve_server_env
 
@@ -75,4 +78,61 @@ def test_factory_returns_client_with_injected_env(monkeypatch) -> None:
         "github", "npx", ["-y", "@modelcontextprotocol/server-github"], {}
     )
     client = env_injecting_client_factory(config)  # no connect() -> no subprocess
+    assert client.config.env["GITHUB_TOKEN"] == "x"
+
+
+# --- arg cleaning: omit None-valued optionals from MCP tool calls -----------
+#
+# langchain materializes every unset optional as None (via model_dump on the
+# bridge's args_schema) and the bridge forwards the whole dict to call_tool — so
+# the github server gets {direction: null, labels: null, ...} and its zod schema
+# rejects null. The factory's client must strip None-valued args before the call,
+# sending those optionals ABSENT (what zod wants). Env injection must still work.
+
+
+def _gh_config() -> MCPServerConfig:
+    return MCPServerConfig("github", "npx", ["-y", "@modelcontextprotocol/server-github"], {})
+
+
+def _client_with_mock_session() -> tuple[MCPClient, MagicMock]:
+    """Factory-built client with a fake MCP session injected (no subprocess).
+
+    The session's call_tool returns an empty-content result so MCPClient.call_tool
+    completes; the mock records exactly what arguments reached the transport.
+    """
+    client = env_injecting_client_factory(_gh_config())
+    session = MagicMock()
+    session.call_tool = AsyncMock(return_value=SimpleNamespace(content=[]))
+    client._session = session  # MCPClient stores the session as a plain attr
+    return client, session
+
+
+def test_factory_returns_arg_cleaning_client() -> None:
+    client = env_injecting_client_factory(_gh_config())
+    # still a real MCPClient, but the None-stripping subclass (not plain MCPClient)
+    assert isinstance(client, MCPClient)
+    assert type(client) is not MCPClient
+
+
+async def test_call_tool_strips_none_args() -> None:
+    client, session = _client_with_mock_session()
+    await client.call_tool(
+        "list_issues",
+        {"owner": "o", "repo": "r", "direction": None, "labels": None, "page": None},
+    )
+    # the None-valued optionals are dropped — only real args reach the transport
+    session.call_tool.assert_called_once_with("list_issues", {"owner": "o", "repo": "r"})
+
+
+async def test_call_tool_keeps_falsy_non_none() -> None:
+    client, session = _client_with_mock_session()
+    await client.call_tool("t", {"a": 0, "b": "", "c": False, "d": None})
+    # only None (d) is stripped; 0 / "" / False are legitimate values and kept
+    session.call_tool.assert_called_once_with("t", {"a": 0, "b": "", "c": False})
+
+
+def test_env_injection_still_works_on_cleaning_client(monkeypatch) -> None:
+    # the arg-cleaning subclass must NOT regress the token injection
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    client = env_injecting_client_factory(_gh_config())
     assert client.config.env["GITHUB_TOKEN"] == "x"
