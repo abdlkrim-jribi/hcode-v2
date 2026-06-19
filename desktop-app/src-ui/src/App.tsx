@@ -193,6 +193,14 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ target: 'explorer' | 'agent' | null; startX: number; startWidth: number }>({ target: null, startX: 0, startWidth: 0 });
 
+  // Latest workDir + fileTree for the daemon-message listener, which is set up
+  // once with [] deps and would otherwise close over stale values. Used to
+  // auto-refresh the explorer when a task completes (see the 'done' handler).
+  const workDirRef = useRef(state.workDir);
+  const fileTreeRef = useRef(state.fileTree);
+  useEffect(() => { workDirRef.current = state.workDir; }, [state.workDir]);
+  useEffect(() => { fileTreeRef.current = state.fileTree; }, [state.fileTree]);
+
   // ── Derived conversation state ────────────────────────────────────────────
   const activeTurn = state.turns.length ? state.turns[state.turns.length - 1] : null;
   const phase: AgentPhase = activeTurn ? activeTurn.phase : 'idle';
@@ -225,8 +233,20 @@ export default function App() {
     const handleMessage = (msg: HcodeMessage) => {
       if (msg.type === 'ready') { dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' }); return; }
       dispatch({ type: 'AGENT_MSG', msg });
-      // A completed task may have just persisted this session's .db — refresh the list.
-      if (msg.type === 'done') ipc.listSessions().then(s => dispatch({ type: 'SET_SESSIONS', sessions: s })).catch(() => {});
+      if (msg.type === 'done') {
+        // A completed task may have just persisted this session's .db — refresh the list.
+        ipc.listSessions().then(s => dispatch({ type: 'SET_SESSIONS', sessions: s })).catch(() => {});
+        // …and it may have created/edited/deleted files — re-read the open folder
+        // so the explorer reflects disk without a manual refresh. Only when a
+        // folder is open; errors (e.g. the folder was removed) are swallowed so a
+        // failed re-read just leaves the current tree intact.
+        const dir = workDirRef.current;
+        if (dir) {
+          refreshTreePreservingExpanded(dir, fileTreeRef.current)
+            .then(tree => dispatch({ type: 'SET_FILE_TREE', tree }))
+            .catch(() => { /* folder unreadable/removed — keep the current tree */ });
+        }
+      }
     };
 
     track(ipc.onDaemonMessage(handleMessage));
@@ -569,4 +589,41 @@ function updateTreeChildren(tree: FileEntry[], parentPath: string, children: Fil
     if (entry.children) return { ...entry, children: updateTreeChildren(entry.children, parentPath, children) };
     return entry;
   });
+}
+
+/** Find an entry by absolute path anywhere in the (possibly nested) tree. */
+function findEntryByPath(tree: FileEntry[], path: string): FileEntry | null {
+  for (const entry of tree) {
+    if (entry.path === path) return entry;
+    if (entry.children) {
+      const found = findEntryByPath(entry.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Re-read `dir` from disk and return a fresh tree that preserves the previous
+ * tree's expansion state: any directory whose children were already loaded is
+ * re-fetched recursively, so files the agent created/edited/deleted show up at
+ * every currently-visible level — not just the root. Directories that were
+ * never expanded stay unloaded (children undefined), exactly as the lazy-load
+ * path leaves them. A vanished directory (deleted mid-task) is left unloaded
+ * rather than aborting the whole refresh.
+ */
+async function refreshTreePreservingExpanded(dir: string, prevTree: FileEntry[]): Promise<FileEntry[]> {
+  const fresh = await ipc.listDirectory(dir);
+  for (const entry of fresh) {
+    if (!entry.isDirectory) continue;
+    const prev = findEntryByPath(prevTree, entry.path);
+    if (prev && Array.isArray(prev.children)) {
+      try {
+        entry.children = await refreshTreePreservingExpanded(entry.path, prev.children);
+      } catch {
+        // Directory removed during the task — leave it collapsed/unloaded.
+      }
+    }
+  }
+  return fresh;
 }
