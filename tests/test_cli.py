@@ -361,6 +361,33 @@ def test_render_banner_contains_hcode() -> None:
     assert "HCODE" in console.export_text()
 
 
+def test_banner_has_kpit() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_banner
+
+    console = Console(record=True, width=100)
+    console.print(render_banner())
+    out = console.export_text()
+    assert "powered by KPIT" in out          # new tagline
+    # the rest of the info line is unchanged
+    assert "HCODE v2.0.0" in out
+    assert "AI-Powered Coding Agent" in out
+
+
+def test_banner_no_longer_shows_stack() -> None:
+    from rich.console import Console
+
+    from hcode_v2.cli.banner import render_banner
+
+    console = Console(record=True, width=100)
+    console.print(render_banner())
+    out = console.export_text()
+    # tagline was REPLACED, not appended — the old stack mention is gone
+    assert "DeepAgents" not in out
+    assert "LangGraph" not in out
+
+
 def test_render_welcome_renders_tips() -> None:
     from rich.console import Console
 
