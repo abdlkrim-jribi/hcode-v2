@@ -345,7 +345,12 @@ export default function App() {
         dispatch({ type: 'AGENT_MSG', msg: { type: 'error', payload: { message: m || 'Failed to submit task', suggestion: '' } } });
       }
     }
-  }, [state.currentSessionId]);
+    // state.workDir MUST be in deps: switching folders mid-session changes
+    // workDir but NOT currentSessionId, so without it this callback would close
+    // over the stale (previous) workDir and keep sending it — the daemon then
+    // sees the same work_dir for the thread_id and never evicts/rebuilds the
+    // cached agent, so the agent keeps working in the old folder.
+  }, [state.currentSessionId, state.workDir]);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
