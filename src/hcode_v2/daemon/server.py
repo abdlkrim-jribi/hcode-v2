@@ -57,9 +57,9 @@ class JsonRpcDaemon:
         self._mcp_config = mcp_config
         self._running = True
         self._current_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
-        # Per-session agent cache, keyed by thread_id. Mirrors the CLI's
-        # build-once-reuse pattern (cli/main.py:196) so a session keeps its
-        # memory across run_task calls instead of rebuilding every task.
+        # Per-session agent cache, keyed by thread_id. Each entry is a dict
+        # {"agent": ..., "work_dir": str} so we can detect when the user opens
+        # a different folder mid-session and evict the stale agent.
         self._agents: dict[str, Any] = {}
 
         self._real_stdout = sys.stdout
@@ -177,7 +177,8 @@ class JsonRpcDaemon:
             return
         task: str = params.get("task", "")
         thread_id: str = params.get("thread_id") or f"gui_{abs(hash(task))}"
-        self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id))
+        work_dir: Optional[str] = params.get("work_dir") or None
+        self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id, work_dir))
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
         name: str = params.get("workflow", "")
@@ -186,7 +187,7 @@ class JsonRpcDaemon:
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
-    async def _run_task(self, req_id: Any, task: str, thread_id: str) -> None:
+    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
 
@@ -207,16 +208,24 @@ class JsonRpcDaemon:
             # the same thread_id. persist=True routes state through the SQLite
             # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
             # across tasks and are resumable — matching the CLI.
-            agent = self._agents.get(thread_id)
-            if agent is None:
+            # Evict the cached agent if the user opened a different folder
+            # (work_dir changed) — the backend root_dir is baked in at build time.
+            cached = self._agents.get(thread_id)
+            if cached is not None and cached["work_dir"] != work_dir:
+                cached = None
+                del self._agents[thread_id]
+            if cached is None:
                 agent = await create_hcode_agent(
                     skills_dir=self._skills_dir,
                     workflows_dir=self._workflows_dir,
                     mcp_config=self._mcp_config,
                     session_id=thread_id,
                     persist=True,
+                    work_dir=work_dir,
                 )
-                self._agents[thread_id] = agent
+                self._agents[thread_id] = {"agent": agent, "work_dir": work_dir}
+            else:
+                agent = cached["agent"]
             last_text = ""
             async for event in agent.astream_events(
                 {"messages": [HumanMessage(content=task)]},

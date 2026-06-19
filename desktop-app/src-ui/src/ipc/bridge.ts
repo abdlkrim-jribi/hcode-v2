@@ -326,9 +326,10 @@ export async function getDaemonHealth(): Promise<DaemonInfo> {
 
 // ── Task commands ─────────────────────────────────────────────────────────────
 
-export async function runTask(task: string, mode: 'planning' | 'fast', autonomous: boolean, threadId?: string): Promise<void> {
+export async function runTask(task: string, mode: 'planning' | 'fast', autonomous: boolean, threadId?: string, workDir?: string): Promise<void> {
     const params: Record<string, unknown> = { task, mode, autonomous };
     if (threadId) params.thread_id = threadId;   // daemon resumes/creates this session (persist=True)
+    if (workDir)  params.work_dir  = workDir;    // folder the user opened; absent = daemon falls back to cwd
     return (await getInvoke())('run_task', params) as Promise<void>;
 }
 export async function abortTask(): Promise<void> {
