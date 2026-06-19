@@ -312,7 +312,7 @@ export default function App() {
     try {
       // Thread the active session id so the daemon resumes/persists this session
       // (persist=True + per-session agent cache => the agent remembers prior turns).
-      await ipc.runTask(task, mode, false, state.currentSessionId);
+      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       if (/already running/i.test(m)) {
