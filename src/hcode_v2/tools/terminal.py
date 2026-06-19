@@ -146,9 +146,12 @@ def ls(path: Optional[str] = None, all_files: bool = False) -> str:
         path: Directory to list (default: project root).
         all_files: If True, include hidden files.
     """
-    from pathlib import Path
+    from hcode_v2.tools.files import PathEscapeError, _resolve_path
 
-    target = Path(path) if path else get_root_dir()
+    try:
+        target = _resolve_path(path) if path else get_root_dir()
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}"
     if not target.exists():
         return f"Error: path not found: {target}"
     try:

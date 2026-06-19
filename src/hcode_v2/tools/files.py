@@ -283,7 +283,10 @@ def glob(pattern: str, directory: Optional[str] = None) -> str:
         pattern: Glob pattern (e.g. '**/*.py').
         directory: Directory to search in (default: project root).
     """
-    root = Path(directory) if directory else get_root_dir()
+    try:
+        root = _resolve_path(directory) if directory else get_root_dir()
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {directory}"
     if not root.exists():
         return f"Error: directory not found: {root}"
     try:
@@ -305,9 +308,10 @@ def grep(pattern: str, path: Optional[str] = None, include: Optional[str] = None
         include: Glob pattern to filter files (e.g. '*.py').
     """
     root = get_root_dir()
-    target = Path(path) if path else root
-    if not target.is_absolute():
-        target = root / target
+    try:
+        target = _resolve_path(path) if path else root
+    except PathEscapeError:
+        return f"Error: path escapes the working directory: {path}"
 
     try:
         regex = re.compile(pattern)

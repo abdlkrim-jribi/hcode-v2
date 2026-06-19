@@ -19,6 +19,7 @@ from deepagents.mcp.bridge import MCPToolRegistry
 from deepagents.mcp.client import MCPClientManager
 
 from hcode_v2.agent.mcp_env import env_injecting_client_factory
+from hcode_v2.agent.path_containment import _PathContainmentMiddleware
 from hcode_v2.provider.fallback import maybe_wrap
 from hcode_v2.tools.lsp_tools import verify_diagnostics_addendum
 from hcode_v2.utils.config import Config
@@ -169,6 +170,13 @@ async def create_hcode_agent(
     # NOTE: imports a PRIVATE deepagents symbol (_tool_exclusion) — intentional;
     # revisit on a deepagents re-vendor if that module path changes.
     middleware.append(_ToolExclusionMiddleware(excluded=frozenset({"edit_file", "write_file"})))
+    # Containment at the EXECUTION seam: re-home the path arg of every file tool
+    # (builtins AND hcode's) through _resolve_path before the tool runs, so a
+    # bound-but-uncontained builtin the model calls from memory (e.g. write_file
+    # with "/x.py") can't escape the working dir. Menu exclusion above hides the
+    # mutating builtins; this guards the rest (read_file/ls/glob/grep) and any
+    # excluded builtin still named from memory. HCode-side; deepagents untouched.
+    middleware.append(_PathContainmentMiddleware())
 
     mcp_tools = []
     # _client_factory injects each server's env_required secrets from os.environ
