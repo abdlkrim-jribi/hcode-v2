@@ -146,6 +146,8 @@ def test_bash_no_output() -> None:
 
 
 def test_edit_still_renders_diff() -> None:
+    # Regression: slice 2 adds a header ABOVE the diff — the colored diff body
+    # (red - / green +) must still appear, the +++/---/@@ noise still dropped.
     out = _feed_text(
         _tool_start("edit", path="calc.py"),
         _tool_end("edit", artifact={
@@ -157,6 +159,36 @@ def test_edit_still_renders_diff() -> None:
     assert "(+1, -1)" in out
     assert "old line" in out and "new line" in out
     assert "@@" not in out
+
+
+# --- EDIT panel (slice 2) --------------------------------------------------
+
+
+def test_edit_header_has_pencil_and_purple_verb() -> None:
+    out = _feed_text(
+        _tool_start("edit", path="calc.py"),
+        _tool_end("edit", artifact={
+            "diff": "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-old line\n+new line",
+            "additions": 1, "deletions": 1, "path": "calc.py",
+        }),
+    )
+    assert "✏" in out            # ✏️ pencil prefixes the EDIT header
+    assert "Edited calc.py" in out    # purple verb+filename (text, not colour)
+    assert "(+1, -1)" in out          # counts carried into the header
+    # the diff body must still be there, below the new header
+    assert "old line" in out and "new line" in out
+
+
+def test_edit_header_shows_parent_dir() -> None:
+    out = _feed_text(
+        _tool_start("edit", path="sub/x.py"),
+        _tool_end("edit", artifact={
+            "diff": "--- a/sub/x.py\n+++ b/sub/x.py\n@@ -1 +1 @@\n-a\n+b",
+            "additions": 1, "deletions": 1, "path": "sub/x.py",
+        }),
+    )
+    assert "(sub/)" in out            # parent dir shown dim in the header, like WRITE
+    assert "Edited x.py" in out       # header uses the basename, parent split off
 
 
 def test_read_still_compact() -> None:

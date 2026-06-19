@@ -458,6 +458,14 @@ class LiveTurnRenderer:
             self._feed.append(self._bash_block(output_text))
             return
 
+        # EDIT — purple icon header above the existing colored diff body.
+        if verb == "Edited":
+            edit_diff = artifact.get("diff") if artifact else None
+            self._feed.append(
+                self._edit_block(verb, path, additions, deletions, edit_diff)
+            )
+            return
+
         # FALLBACK — compact action line + the artifact's real inline diff.
         label = f"{_DONE_GLYPH} {verb} {path}" if path else f"{_DONE_GLYPH} {verb}"
         diff = artifact.get("diff") if artifact else None
@@ -526,6 +534,45 @@ class LiveTurnRenderer:
         rows.extend(self._body_lines(content.splitlines(), _num_row))
         nbytes = len(content.encode("utf-8"))
         rows.append(Text(f"  ({nbytes} bytes written)", style="dim"))
+        return Group(*rows)
+
+    def _edit_block(
+        self,
+        verb: str,
+        path: str | None,
+        additions: int | None,
+        deletions: int | None,
+        diff: Any,
+    ) -> RenderableType:
+        """An EDIT entry: purple icon header above the existing colored diff body.
+
+        The header mirrors ``_write_block`` (icon + ``KPIT_PURPLE`` bold verb +
+        filename, dim ``(parent/)``, counts); the body is the artifact's real
+        diff rendered exactly as the generic fallback does — ``+++``/``---``/``@@``
+        dropped, +/- coloured by ``_diff_line_style``, capped at ``_MAX_DIFF_LINES``.
+        """
+        filename = os.path.basename(path) if path else ""
+        head = Text(f"{ICON_EDIT} ")
+        head.append(f"{verb} {filename}" if filename else verb, style=f"{KPIT_PURPLE} bold")
+        if path:
+            parent = os.path.dirname(path)
+            if parent:
+                head.append(f" ({parent}/)", style="dim")
+        if additions is not None and deletions is not None and (additions or deletions):
+            counts = f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
+            head.append(counts, style=f"{KPIT_PURPLE} bold")
+
+        rows: list[RenderableType] = [head]
+        if diff:
+            rendered = 0
+            for line in str(diff).splitlines():
+                if line.startswith(("+++", "---", "@@")):
+                    continue  # drop header noise
+                if rendered >= _MAX_DIFF_LINES:
+                    rows.append(Text("… (truncated)", style="dim"))
+                    break
+                rows.append(Text(line, style=_diff_line_style(line)))
+                rendered += 1
         return Group(*rows)
 
     def _bash_block(self, output_text: str) -> RenderableType:
