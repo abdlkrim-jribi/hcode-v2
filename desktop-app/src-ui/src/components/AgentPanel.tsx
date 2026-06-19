@@ -19,8 +19,11 @@ interface AgentPanelProps {
     /** Sessions for the dropdown (active first, "default" already filtered). */
     sessions: string[];
     currentSessionId: string;
+    /** Friendly display names keyed by thread_id; falls back to the id. */
+    sessionNames: Record<string, string>;
     onSwitchSession: (id: string) => void;
     onNewSession: () => void;
+    onRenameSession: (id: string, name: string) => void;
     /** Transient non-destructive notice (e.g. single-flight) — not a turn error. */
     notice: string | null;
     onDismissNotice: () => void;
@@ -40,8 +43,10 @@ export default function AgentPanel({
     isBusy,
     sessions,
     currentSessionId,
+    sessionNames,
     onSwitchSession,
     onNewSession,
+    onRenameSession,
     notice,
     onDismissNotice,
     onSubmitTask,
@@ -58,9 +63,11 @@ export default function AgentPanel({
             <AgentHeader
                 sessions={sessions}
                 currentSessionId={currentSessionId}
+                sessionNames={sessionNames}
                 sessionsDisabled={isBusy}
                 onSwitchSession={onSwitchSession}
                 onNewSession={onNewSession}
+                onRenameSession={onRenameSession}
                 onSettingsClick={onSettingsClick}
                 onCollapseClick={onCollapseClick}
             />
