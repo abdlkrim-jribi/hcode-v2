@@ -19,8 +19,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, State};
 
 struct AppState {
-    daemon:   Mutex<daemon::DaemonSupervisor>,
-    work_dir: Mutex<Option<String>>,
+    daemon: Mutex<daemon::DaemonSupervisor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,9 +61,20 @@ async fn daemon_health(state: State<'_, AppState>) -> Result<DaemonInfo, String>
 
 // ── Task commands ─────────────────────────────────────────────────────────────
 
-#[tauri::command]
-async fn run_task(task: String, mode: String, autonomous: bool, state: State<'_, AppState>) -> Result<(), String> {
-    rpc(&state, "run_task", serde_json::json!({ "task": task, "mode": mode, "autonomous": autonomous }))
+// rename_all = "snake_case" is MANDATORY: Tauri v2 defaults to camelCase invoke
+// args, but bridge.ts sends snake_case keys (it must — server.py reads the same
+// payload verbatim on the WS path). Without it, work_dir/thread_id bind to None
+// and the agent silently runs in the daemon's cwd instead of the opened folder.
+#[tauri::command(rename_all = "snake_case")]
+async fn run_task(
+    task: String, mode: String, autonomous: bool,
+    thread_id: Option<String>, work_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut params = serde_json::json!({ "task": task, "mode": mode, "autonomous": autonomous });
+    if let Some(tid) = thread_id { params["thread_id"] = serde_json::json!(tid); }
+    if let Some(wd)  = work_dir  { params["work_dir"]  = serde_json::json!(wd); }
+    rpc(&state, "run_task", params)
 }
 #[tauri::command]
 async fn abort_task(state: State<'_, AppState>) -> Result<(), String> {
@@ -194,7 +204,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState { daemon: Mutex::new(daemon::DaemonSupervisor::new()), work_dir: Mutex::new(None) })
+        .manage(AppState { daemon: Mutex::new(daemon::DaemonSupervisor::new()) })
         .invoke_handler(tauri::generate_handler![
             start_daemon, stop_daemon, daemon_health,
             run_task, abort_task, approve_plan, reject_plan,
