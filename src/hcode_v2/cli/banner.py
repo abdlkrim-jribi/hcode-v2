@@ -66,7 +66,7 @@ def render_banner() -> RenderableType:
     info.append("  │  ", style="dim")
     info.append("AI-Powered Coding Agent", style="italic #00FFFF")
     info.append("  │  ", style="dim")
-    info.append("DeepAgents + LangGraph", style="#39FF14")
+    info.append("powered by KPIT", style="#39FF14")
 
     return Group(
         Align.center(art),
