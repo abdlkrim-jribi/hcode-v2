@@ -101,6 +101,8 @@ _TOOL_LABELS: dict[str, str] = {
     "edit": "Edited",
     "multi_edit": "Edited",
     "ls": "Listed",
+    "execute": "Bash",
+    "bash": "Bash",
 }
 # Completed-action glyph (the app runs with PYTHONIOENCODING=utf-8).
 _DONE_GLYPH = "✓"
@@ -109,6 +111,27 @@ _MAX_DIFF_LINES = 40
 # Verbs that count as a file mutation for the end-of-turn outcome summary
 # (read/ls actions are shown only when there are no mutations).
 _MUTATION_VERBS: frozenset[str] = frozenset({"Wrote", "Created", "Edited"})
+
+# ── KPIT brand theme (single source of truth) ────────────────────────────────
+# Sampled from the KPIT logo: lime green primary + a dimmed variant; a brand
+# purple for edits (used in slice 2). Rich style strings reference these hexes.
+KPIT_GREEN = "#AEFC42"      # WRITE accent — header verb + ✓
+KPIT_GREEN_DIM = "#7DB52F"  # gutter / secondary / BASH
+KPIT_PURPLE = "#9B5DE5"     # EDIT accent (slice 2)
+
+# Per-action header icons (the verb already carries colour; the icon adds glance
+# value). READ/LS stay iconless — they keep the compact "✓ Read <path>" line.
+ICON_WRITE = "\U0001F4C4"   # 📄 write/write_file
+ICON_EDIT = "✏️"  # ✏️ edit/edit_file/multi_edit (slice 2 — not wired yet)
+ICON_BASH = "▶"        # ▶ execute/bash (monochrome — aligns better than emoji)
+
+# Show at most this many head + tail lines of a long write/bash body before
+# collapsing the middle (mirrors v1's 4-head/4-tail truncation).
+_BODY_HEAD = 4
+_BODY_TAIL = 4
+_BODY_FULL_MAX = 10  # bodies this short are shown in full
+# Truncate a bash command in the header to keep the line tidy.
+_CMD_MAX = 70
 
 
 def _relative_path(path: str) -> str:
@@ -201,6 +224,7 @@ class LiveTurnRenderer:
         self._todos: list[tuple[str, str]] = []
         self._active_tool: str | None = None
         self._active_path: str | None = None
+        self._active_args: dict = {}
         self._feed: list[RenderableType] = []
         # Structured record of completed actions for the end-of-turn outcome
         # summary: (verb, path, additions, deletions).
@@ -354,6 +378,9 @@ class LiveTurnRenderer:
             tool_input = data.get("input")
             if not isinstance(tool_input, dict):
                 tool_input = {}
+            # Stash the FULL args so the renderer can show the write content / the
+            # bash command (not just the path).
+            self._active_args = dict(tool_input)
             # deepagents builtins use "file_path"; hcode's own tools use "path".
             path = tool_input.get("file_path") or tool_input.get("path")
             self._active_path = _relative_path(str(path)) if path else None
@@ -382,15 +409,28 @@ class LiveTurnRenderer:
                 artifact = getattr(output, "artifact", None)
                 if not isinstance(artifact, dict):
                     artifact = None
-                self._append_action(tool, artifact)
+                content = getattr(output, "content", output)
+                output_text = content if isinstance(content, str) else ""
+                self._append_action(tool, artifact, output_text)
             except Exception:  # noqa: BLE001 — display-only, never break the turn
                 logger.debug("live feed ignored a malformed tool result", exc_info=True)
         self._active_tool = None
         self._active_path = None
+        self._active_args = {}
         self._refresh()
 
-    def _append_action(self, tool: str, artifact: dict | None) -> None:
-        """Push a coloured action line (+ optional inline diff) onto the feed."""
+    def _append_action(
+        self, tool: str, artifact: dict | None, output_text: str = ""
+    ) -> None:
+        """Push a completed-action entry onto the feed.
+
+        A brand-new file write (``Wrote``/``Created`` whose call args still hold
+        the full ``content``) and a bash run (``Bash``) each get a multi-line
+        block — header + numbered/output body + footer — built from the stashed
+        ``self._active_args``. Everything else keeps the compact
+        "✓ <verb> <path>" line plus the artifact's real inline diff (used for
+        edits and for an overwrite that only carries a diff, not content).
+        """
         verb = _TOOL_LABELS.get(tool, tool)
         artifact_path = artifact.get("path") if artifact else None
         path = _relative_path(str(artifact_path)) if artifact_path else self._active_path
@@ -402,15 +442,29 @@ class LiveTurnRenderer:
         if not isinstance(deletions, int):
             deletions = None
 
-        label = f"{_DONE_GLYPH} {verb} {path}" if path else f"{_DONE_GLYPH} {verb}"
+        # Structured record for the end-of-turn outcome summary (every branch).
+        self._actions.append((verb, path, additions, deletions))
 
+        content = self._active_args.get("content")
+        # WRITE — full content in the call args ⇒ numbered preview, not a diff.
+        if verb in ("Wrote", "Created") and isinstance(content, str) and content:
+            self._feed.append(
+                self._write_block(verb, path, content, additions, deletions)
+            )
+            return
+
+        # BASH — command in the header, captured output as the body.
+        if verb == "Bash":
+            self._feed.append(self._bash_block(output_text))
+            return
+
+        # FALLBACK — compact action line + the artifact's real inline diff.
+        label = f"{_DONE_GLYPH} {verb} {path}" if path else f"{_DONE_GLYPH} {verb}"
         diff = artifact.get("diff") if artifact else None
         if artifact and diff and additions is not None and deletions is not None and (additions or deletions):
             label += f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
 
         self._feed.append(Text(label, style="green"))
-        # Structured record for the end-of-turn outcome summary.
-        self._actions.append((verb, path, additions, deletions))
 
         if artifact and diff:
             rendered = 0
@@ -422,6 +476,74 @@ class LiveTurnRenderer:
                     break
                 self._feed.append(Text(line, style=_diff_line_style(line)))
                 rendered += 1
+
+    def _body_lines(
+        self, lines: list[str], render: Callable[[int, str], Text]
+    ) -> list[Text]:
+        """Build body rows, collapsing the middle when the body is long.
+
+        ``render(idx, line)`` formats the row for the 0-based ORIGINAL line index
+        (so line numbers survive truncation). Bodies of ``_BODY_FULL_MAX`` lines
+        or fewer render in full; longer ones show the first ``_BODY_HEAD`` and
+        last ``_BODY_TAIL`` lines with a dim "… hidden" divider between.
+        """
+        total = len(lines)
+        if total <= _BODY_FULL_MAX:
+            return [render(idx, line) for idx, line in enumerate(lines)]
+        rows: list[Text] = [render(idx, lines[idx]) for idx in range(_BODY_HEAD)]
+        hidden = total - _BODY_HEAD - _BODY_TAIL
+        rows.append(Text(f"      ⋮ {hidden} lines hidden", style="dim"))
+        rows.extend(render(idx, lines[idx]) for idx in range(total - _BODY_TAIL, total))
+        return rows
+
+    def _write_block(
+        self,
+        verb: str,
+        path: str | None,
+        content: str,
+        additions: int | None,
+        deletions: int | None,
+    ) -> RenderableType:
+        """A WRITE entry: green header, numbered content preview, byte footer."""
+        filename = os.path.basename(path) if path else ""
+        head = Text(f"{ICON_WRITE} ")
+        head.append(f"{verb} {filename}" if filename else verb, style=f"{KPIT_GREEN} bold")
+        if path:
+            parent = os.path.dirname(path)
+            if parent:
+                head.append(f" ({parent}/)", style="dim")
+        if additions is not None and deletions is not None and (additions or deletions):
+            counts = f" (+{additions})" if deletions == 0 else f" (+{additions}, -{deletions})"
+            head.append(counts, style=f"{KPIT_GREEN} bold")
+
+        def _num_row(idx: int, line: str) -> Text:
+            row = Text()
+            row.append(f"  {idx + 1:>3} │ ", style=KPIT_GREEN_DIM)
+            row.append(line)
+            return row
+
+        rows: list[RenderableType] = [head]
+        rows.extend(self._body_lines(content.splitlines(), _num_row))
+        nbytes = len(content.encode("utf-8"))
+        rows.append(Text(f"  ({nbytes} bytes written)", style="dim"))
+        return Group(*rows)
+
+    def _bash_block(self, output_text: str) -> RenderableType:
+        """A BASH entry: dim-green "Bash <cmd>" header + dim command output."""
+        command = str(self._active_args.get("command", ""))
+        if len(command) > _CMD_MAX:
+            command = command[:_CMD_MAX] + "…"
+        head = Text(f"{ICON_BASH} Bash {command}".rstrip(), style=KPIT_GREEN_DIM)
+
+        rows: list[RenderableType] = [head]
+        body = output_text.splitlines() if output_text else []
+        if body:
+            rows.extend(
+                self._body_lines(body, lambda _idx, line: Text(f"  {line}", style="dim"))
+            )
+        else:
+            rows.append(Text("  (no output)", style="dim"))
+        return Group(*rows)
 
     def _on_model_end(self, data: dict) -> None:
         """Classify each model output by its content markers.
