@@ -189,13 +189,15 @@ def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
 
 
 async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: str) -> str:
-    """Ask the user to approve or reject a shell command (slice a).
+    """Ask the user to accept, reject, or always-accept a shell command (slice b).
 
     Called only when approval is enabled (a TTY is present and the Rich Live
     region is down), so ``prompt_async`` is safe. Shows the command in a
-    yellow-bordered panel, then reads one line: Enter / ``y`` / ``yes`` ->
-    ``"approve"`` (the user is watching, so default-accept), anything else ->
-    ``"reject"``.
+    yellow-bordered panel, then reads one line and maps it to one of three
+    choices: Enter / ``a`` / ``accept`` / ``y`` / ``yes`` -> ``"accept"`` (the
+    user is watching, so default-accept); ``t`` / ``always`` -> ``"always"``
+    (run this one AND auto-approve the rest of the session); anything else (incl.
+    ``r`` / ``reject`` / ``n``) -> ``"reject"``.
 
     Args:
         display: The chat display (provides the Rich console).
@@ -203,7 +205,7 @@ async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: 
         command: The shell command to run, or ``""`` if it could not be read.
 
     Returns:
-        ``"approve"`` or ``"reject"``.
+        ``"accept"``, ``"always"``, or ``"reject"``.
     """
     body = (
         f"Run this command?\n\n[bold]$ {escape(command)}[/bold]"
@@ -211,8 +213,13 @@ async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: 
         else "Run a shell command?"
     )
     display.console.print(Panel(body, title="Approval", border_style="yellow"))
-    answer = (await prompt_session.prompt_async("approve? [Y/n] ")).strip().lower()
-    return "approve" if answer in ("", "y", "yes") else "reject"
+    display.console.print("[dim][A]ccept  ·  [R]eject  ·  Always accept [T][/dim]")
+    answer = (await prompt_session.prompt_async("> ")).strip().lower()
+    if answer in ("", "a", "accept", "y", "yes"):
+        return "accept"
+    if answer in ("t", "always"):
+        return "always"
+    return "reject"
 
 
 @cli.command()
@@ -261,6 +268,9 @@ def chat(session: str | None, workdir: str | None) -> None:
         # FileHistory + auto-suggest. Dispatch below is unchanged.
         prompt_session = build_chat_session(work_dir=workdir)
         show_todos = True  # /todos toggle (loop-local)
+        # Session-scoped (NOT per-turn): once the user picks "always" at an
+        # approval prompt, every later shell call this session auto-approves.
+        always_approve = False
 
         while True:
             # Persistent-feel status line: re-rendered just above each prompt.
@@ -336,7 +346,12 @@ def chat(session: str | None, workdir: str | None) -> None:
                     while state.interrupts:
                         value = state.interrupts[0].value
                         command = _command_from_interrupt(value)
-                        decision = await _prompt_bash_approval(display, prompt_session, command)
+                        if always_approve:
+                            decision = "accept"  # session flag set: no prompt
+                        else:
+                            decision = await _prompt_bash_approval(display, prompt_session, command)
+                            if decision == "always":
+                                always_approve = True  # auto-approve every later shell call
                         with renderer:  # fresh Live for the resumed run
                             async for event in agent.astream_events(
                                 Command(resume={"decisions": [_decision_for_choice(decision)]}),

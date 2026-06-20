@@ -95,3 +95,20 @@ def test_decision_reject() -> None:
 def test_decision_reject_with_message() -> None:
     """reject with feedback → reject decision carrying the message."""
     assert _decision_for_choice("reject", "no") == {"type": "reject", "message": "no"}
+
+
+def test_decision_always_runs_like_approve() -> None:
+    """slice (b): "always" still RUNS this command — the resume decision is the
+    same bare approve as "accept". The "stop asking for the rest of the session"
+    effect is a chat-loop session flag, NOT part of the decision dict.
+    """
+    assert _decision_for_choice("always") == {"type": "approve"}
+
+
+def test_decision_accept_runs() -> None:
+    """slice (b) live vocabulary: "accept" is the prompt's yes-token (and the
+    always-auto path's choice). It MUST resolve to approve so the command runs —
+    earlier tests only checked "approve", missing that the chat loop sends
+    "accept", which was silently mapping to reject.
+    """
+    assert _decision_for_choice("accept") == {"type": "approve"}

@@ -49,9 +49,11 @@ def _command_from_interrupt(value: Any) -> str:
 
 def _decision_for_choice(choice: str, message: str = "") -> dict[str, Any]:
     """Map a user choice to a resume Command decision dict.
-    "approve" -> {"type":"approve"}; anything else -> {"type":"reject"} (+ message
-    if given)."""
-    if choice == "approve":
+    "approve"/"accept"/"always" -> {"type":"approve"} (all RUN this command; the
+    chat loop's prompt yes-token is "accept" and the always-auto path also sends
+    "accept", while the "always" session effect lives in the chat loop, not the
+    decision); anything else -> {"type":"reject"} (+ message if given)."""
+    if choice in ("approve", "accept", "always"):
         return {"type": "approve"}
     decision: dict[str, Any] = {"type": "reject"}
     if message:
