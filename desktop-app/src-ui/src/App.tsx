@@ -178,9 +178,18 @@ export default function App() {
     try { const s = localStorage.getItem('hcode-editor-settings'); return s ? JSON.parse(s) : { fontSize: 13, wordWrap: false, minimap: true, lineNumbers: true, tabSize: 4 }; }
     catch { return { fontSize: 13, wordWrap: false, minimap: true, lineNumbers: true, tabSize: 4 }; }
   });
+  // Friendly display names per session, keyed by thread_id. The thread_id never
+  // changes (so daemon memory stays intact); only the label does. Same
+  // localStorage convention as hcode-theme / hcode-session-id. The dropdown
+  // falls back to the thread_id when a session has no custom name.
+  const [sessionNames, setSessionNames] = useState<Record<string, string>>(() => {
+    try { const s = localStorage.getItem('hcode-session-names'); return s ? JSON.parse(s) : {}; }
+    catch { return {}; }
+  });
 
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('hcode-theme', theme); }, [theme]);
   useEffect(() => { localStorage.setItem('hcode-editor-settings', JSON.stringify(editorSettings)); }, [editorSettings]);
+  useEffect(() => { try { localStorage.setItem('hcode-session-names', JSON.stringify(sessionNames)); } catch { /* storage unavailable */ } }, [sessionNames]);
   // Persist the active session id; auto-dismiss notices; fetch the session list on mount.
   useEffect(() => { try { localStorage.setItem(SESSION_KEY, state.currentSessionId); } catch { /* ignore */ } }, [state.currentSessionId]);
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 4500); return () => clearTimeout(t); }, [notice]);
@@ -345,7 +354,12 @@ export default function App() {
         dispatch({ type: 'AGENT_MSG', msg: { type: 'error', payload: { message: m || 'Failed to submit task', suggestion: '' } } });
       }
     }
-  }, [state.currentSessionId]);
+    // state.workDir MUST be in deps: switching folders mid-session changes
+    // workDir but NOT currentSessionId, so without it this callback would close
+    // over the stale (previous) workDir and keep sending it — the daemon then
+    // sees the same work_dir for the thread_id and never evicts/rebuilds the
+    // cached agent, so the agent keeps working in the old folder.
+  }, [state.currentSessionId, state.workDir]);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
@@ -380,6 +394,23 @@ export default function App() {
   const handleSwitchSession = useCallback((id: string) => {
     dispatch({ type: 'SWITCH_SESSION', id });
     setShowDiffReview(false);
+  }, []);
+
+  // Rename a session's display label only — the thread_id is unchanged, so the
+  // daemon still resumes the same memory. An empty/blank name clears the custom
+  // label (reverts the dropdown to the thread_id fallback).
+  const handleRenameSession = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    setSessionNames(prev => {
+      if (!trimmed) {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      if (prev[id] === trimmed) return prev;
+      return { ...prev, [id]: trimmed };
+    });
   }, []);
 
   // ── Command registry ──────────────────────────────────────────────────────
@@ -560,8 +591,10 @@ export default function App() {
                 isBusy={isBusy}
                 sessions={displayedSessions}
                 currentSessionId={state.currentSessionId}
+                sessionNames={sessionNames}
                 onSwitchSession={handleSwitchSession}
                 onNewSession={handleNewSession}
+                onRenameSession={handleRenameSession}
                 notice={notice}
                 onDismissNotice={() => setNotice(null)}
                 onSubmitTask={handleSubmitTask}
