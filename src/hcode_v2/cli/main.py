@@ -36,10 +36,17 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 import click
 from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 from rich.markup import escape
+from rich.panel import Panel
 
 from deepagents.middleware.task_classifier import TaskClassifier
 
+from hcode_v2.agent.approval import (
+    _approval_interrupt_on,
+    _command_from_interrupt,
+    _decision_for_choice,
+)
 from hcode_v2.agent.factory import create_hcode_agent
 from hcode_v2.cli.banner import render_banner, render_welcome, render_welcome_help
 from hcode_v2.cli.completion import CHAT_COMMANDS, build_chat_session
@@ -181,6 +188,33 @@ def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: str) -> str:
+    """Ask the user to approve or reject a shell command (slice a).
+
+    Called only when approval is enabled (a TTY is present and the Rich Live
+    region is down), so ``prompt_async`` is safe. Shows the command in a
+    yellow-bordered panel, then reads one line: Enter / ``y`` / ``yes`` ->
+    ``"approve"`` (the user is watching, so default-accept), anything else ->
+    ``"reject"``.
+
+    Args:
+        display: The chat display (provides the Rich console).
+        prompt_session: The prompt_toolkit session used for the chat input.
+        command: The shell command to run, or ``""`` if it could not be read.
+
+    Returns:
+        ``"approve"`` or ``"reject"``.
+    """
+    body = (
+        f"Run this command?\n\n[bold]$ {escape(command)}[/bold]"
+        if command
+        else "Run a shell command?"
+    )
+    display.console.print(Panel(body, title="Approval", border_style="yellow"))
+    answer = (await prompt_session.prompt_async("approve? [Y/n] ")).strip().lower()
+    return "approve" if answer in ("", "y", "yes") else "reject"
+
+
 @cli.command()
 @click.option("--session", "-s", default=None, help="Session ID to resume. Defaults to new timestamped session.")
 @click.option("--workdir", "-w", "-C", default=None,
@@ -212,7 +246,17 @@ def chat(session: str | None, workdir: str | None) -> None:
 
     async def _chat_loop() -> None:
         nonlocal session_id  # /clear rotates it; without this the assignment shadows it
-        agent = await create_hcode_agent(session_id=session_id, work_dir=workdir)
+        # Per-action approval (slice a): gate the shell tools (execute/bash) on
+        # approve/reject, but ONLY in an interactive terminal. Without a TTY there
+        # is nobody to answer the prompt, so the graph would park forever — hence
+        # the gate. run/analyze/explore (ainvoke) and the daemon never set
+        # interrupt_on at all, so they are unaffected regardless.
+        approval_enabled = sys.stdin.isatty() and sys.stdout.isatty()
+        agent = await create_hcode_agent(
+            session_id=session_id,
+            work_dir=workdir,
+            interrupt_on=_approval_interrupt_on(approval_enabled),
+        )
         # Input layer: completion (slash commands, file paths, phrases),
         # FileHistory + auto-suggest. Dispatch below is unchanged.
         prompt_session = build_chat_session(work_dir=workdir)
@@ -262,22 +306,45 @@ def chat(session: str | None, workdir: str | None) -> None:
                 # live. Display-only — same invocation semantics as ainvoke.
                 renderer = LiveTurnRenderer(console=display.console, show_todos=show_todos)
                 t0 = time.perf_counter()
+                # Lifted to a local so the approval resume below targets the SAME
+                # thread (and the same recursion_limit). recursion_limit MUST be
+                # explicit on the astream_events path: langchain_core stamps its
+                # default (25) into the config, which overrides the agent's bound
+                # 9999 and kills tasks after ~5 tool rounds. The daemon's
+                # astream_events (server.py:198) has the same latent issue — fixed
+                # separately.
+                config = {
+                    "configurable": {"thread_id": session_id},
+                    "recursion_limit": 1000,
+                }
                 with renderer:
                     async for event in agent.astream_events(
                         {"messages": [HumanMessage(content=user_input)]},
-                        # recursion_limit MUST be explicit on the astream_events
-                        # path: langchain_core stamps its default (25) into the
-                        # config, which overrides the agent's bound 9999 and
-                        # kills tasks after ~5 tool rounds. The daemon's
-                        # astream_events (server.py:198) has the same latent
-                        # issue — fixed separately.
-                        config={
-                            "configurable": {"thread_id": session_id},
-                            "recursion_limit": 1000,
-                        },
+                        config=config,
                         version="v2",
                     ):
                         renderer.process_event(event)
+                # Per-action approval (slice a): when the graph parks at a shell
+                # tool (execute/bash), HumanInTheLoopMiddleware leaves an interrupt
+                # on the checkpoint and the stream above ends cleanly — so the Live
+                # region is DOWN here and the terminal is free to prompt. Read the
+                # interrupt, ask approve/reject, and resume with a decision; the
+                # resumed run may park again on a second shell call, so loop until
+                # there are no interrupts left. Dead code when approval is off.
+                if approval_enabled:
+                    state = await agent.aget_state(config)
+                    while state.interrupts:
+                        value = state.interrupts[0].value
+                        command = _command_from_interrupt(value)
+                        decision = await _prompt_bash_approval(display, prompt_session, command)
+                        with renderer:  # fresh Live for the resumed run
+                            async for event in agent.astream_events(
+                                Command(resume={"decisions": [_decision_for_choice(decision)]}),
+                                config=config,
+                                version="v2",
+                            ):
+                                renderer.process_event(event)
+                        state = await agent.aget_state(config)
                 duration = time.perf_counter() - t0
                 # Result panel shows a REAL outcome (answer or action summary,
                 # never the plan), with an honest <phase>·model·duration footer

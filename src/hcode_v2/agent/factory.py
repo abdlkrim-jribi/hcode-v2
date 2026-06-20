@@ -108,6 +108,7 @@ async def create_hcode_agent(
     session_id: str = "default",
     persist: bool = True,
     work_dir: str | None = None,
+    interrupt_on: dict | None = None,
 ):
     """Assemble the full HCode v2 agent from environment config."""
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
@@ -203,6 +204,7 @@ async def create_hcode_agent(
         middleware=middleware,
         backend=backend,
         checkpointer=checkpointer,
+        interrupt_on=interrupt_on,
         # Prepended above BASE_AGENT_PROMPT (USER segment); PEV appends its phase
         # prompts below, so this orientation block is present in every phase.
         system_prompt=_build_env_block(resolved_work_dir),
