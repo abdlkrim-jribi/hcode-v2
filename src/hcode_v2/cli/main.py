@@ -37,6 +37,11 @@ os.environ.setdefault("PYTHONUTF8", "1")
 import click
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
+from prompt_toolkit.application import Application
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from rich.markup import escape
 from rich.panel import Panel
 
@@ -188,20 +193,89 @@ def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: str) -> str:
-    """Ask the user to accept, reject, or always-accept a shell command (slice b).
+# Approval menu options, in display order: (return-token, label). The token is
+# the contract the chat loop relies on — accept/always/reject map to a resume
+# decision via _decision_for_choice (accept/always -> run, reject -> block).
+_APPROVAL_OPTIONS: list[tuple[str, str]] = [
+    ("accept", "Accept"),
+    ("always", "Always accept"),
+    ("reject", "Reject"),
+]
+
+
+async def _select_approval_choice() -> str:
+    """Inline ↑/↓ + Enter menu for the approval choice (slice c).
+
+    A standalone, NON-full-screen prompt_toolkit ``Application`` so it renders
+    inline beneath the already-printed yellow Approval panel WITHOUT switching to
+    the alternate screen (a ``*_dialog`` would erase the panel). ``Up``/``Down``
+    move the highlight, ``Enter`` confirms; ``Escape``/``Ctrl-C`` cancel to the
+    safe default ``"reject"``. ``erase_when_done`` wipes the menu's own rows on
+    exit so nothing is orphaned below the panel.
+
+    Returns:
+        One of ``"accept"`` / ``"always"`` / ``"reject"``.
+    """
+    index = 0  # default highlight = Accept (the safe "user is watching" default)
+
+    def render() -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        for i, (_token, label) in enumerate(_APPROVAL_OPTIONS):
+            if i:
+                rows.append(("", "\n"))
+            if i == index:
+                rows.append(("reverse", f"> {label}"))
+            else:
+                rows.append(("", f"  {label}"))
+        return rows
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _(event) -> None:  # noqa: ANN001 - prompt_toolkit event object
+        nonlocal index
+        index = (index - 1) % len(_APPROVAL_OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _(event) -> None:  # noqa: ANN001
+        nonlocal index
+        index = (index + 1) % len(_APPROVAL_OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _(event) -> None:  # noqa: ANN001
+        event.app.exit(result=_APPROVAL_OPTIONS[index][0])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:  # noqa: ANN001
+        event.app.exit(result="reject")  # safe cancel = reject
+
+    app: Application = Application(
+        layout=Layout(
+            Window(FormattedTextControl(render, focusable=True, show_cursor=False))
+        ),
+        key_bindings=kb,
+        full_screen=False,
+        erase_when_done=True,  # clean teardown: erase the menu region on exit
+    )
+    choice = await app.run_async()
+    # run_async returns whatever exit() passed; coerce any odd exit to reject.
+    return choice if choice in ("accept", "always", "reject") else "reject"
+
+
+async def _prompt_bash_approval(display: HCodeDisplay, command: str) -> str:
+    """Ask the user to accept, always-accept, or reject a shell command (slice c).
 
     Called only when approval is enabled (a TTY is present and the Rich Live
-    region is down), so ``prompt_async`` is safe. Shows the command in a
-    yellow-bordered panel, then reads one line and maps it to one of three
-    choices: Enter / ``a`` / ``accept`` / ``y`` / ``yes`` -> ``"accept"`` (the
-    user is watching, so default-accept); ``t`` / ``always`` -> ``"always"``
-    (run this one AND auto-approve the rest of the session); anything else (incl.
-    ``r`` / ``reject`` / ``n``) -> ``"reject"``.
+    region is down). Shows the command in a yellow-bordered panel, then presents
+    an inline arrow-key menu (:func:`_select_approval_choice`): ``"accept"`` runs
+    this command once, ``"always"`` runs it AND auto-approves the rest of the
+    session, ``"reject"`` blocks it.
 
     Args:
         display: The chat display (provides the Rich console).
-        prompt_session: The prompt_toolkit session used for the chat input.
         command: The shell command to run, or ``""`` if it could not be read.
 
     Returns:
@@ -213,13 +287,8 @@ async def _prompt_bash_approval(display: HCodeDisplay, prompt_session, command: 
         else "Run a shell command?"
     )
     display.console.print(Panel(body, title="Approval", border_style="yellow"))
-    display.console.print("[dim][A]ccept  ·  [R]eject  ·  Always accept [T][/dim]")
-    answer = (await prompt_session.prompt_async("> ")).strip().lower()
-    if answer in ("", "a", "accept", "y", "yes"):
-        return "accept"
-    if answer in ("t", "always"):
-        return "always"
-    return "reject"
+    choice = await _select_approval_choice()
+    return choice  # one of "accept"/"always"/"reject" — unchanged downstream
 
 
 @cli.command()
@@ -349,7 +418,7 @@ def chat(session: str | None, workdir: str | None) -> None:
                         if always_approve:
                             decision = "accept"  # session flag set: no prompt
                         else:
-                            decision = await _prompt_bash_approval(display, prompt_session, command)
+                            decision = await _prompt_bash_approval(display, command)
                             if decision == "always":
                                 always_approve = True  # auto-approve every later shell call
                         with renderer:  # fresh Live for the resumed run
