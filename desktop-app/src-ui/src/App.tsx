@@ -163,8 +163,10 @@ export default function App() {
   const [showDiffReview, setShowDiffReview]         = useState(false);
   const [capabilityPanel, setCapabilityPanel]       = useState<null | 'mcp' | 'skills' | 'workflows'>(null);
 
-  // Active skill selected from the Skills panel; the composer appends its name.
+  // Single-skill composer hint (unchanged feature — appends "[Preferred skill: X]" to task text).
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
+  // Multi-select: which skills the agent loads. null = all (default). Set = specific subset.
+  const [activeSkills, setActiveSkills] = useState<Set<string> | null>(null);
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
@@ -341,7 +343,9 @@ export default function App() {
     try {
       // Thread the active session id so the daemon resumes/persists this session
       // (persist=True + per-session agent cache => the agent remembers prior turns).
-      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined);
+      // activeSkills: null → omit param (daemon loads all). Set → send array.
+      const skillsArg = activeSkills && activeSkills.size > 0 ? [...activeSkills] : null;
+      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined, skillsArg);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       if (/already running/i.test(m)) {
@@ -359,7 +363,7 @@ export default function App() {
     // over the stale (previous) workDir and keep sending it — the daemon then
     // sees the same work_dir for the thread_id and never evicts/rebuilds the
     // cached agent, so the agent keeps working in the old folder.
-  }, [state.currentSessionId, state.workDir]);
+  }, [state.currentSessionId, state.workDir, activeSkills]);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
@@ -567,13 +571,18 @@ export default function App() {
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto' }}>
                   <SkillsPanel
-                    activeSkill={activeSkill}
-                    onSelect={name => {
-                      setActiveSkill(name);
-                      setCapabilityPanel(null); // return to conversation view
-                      setAgentCollapsed(false);
-                      setFocus('agent');
+                    activeSkills={activeSkills}
+                    onToggleSkill={(name, allNames) => {
+                      setActiveSkills(prev => {
+                        // null = all selected; convert to full set, then toggle.
+                        const current = prev ?? new Set(allNames);
+                        const next = new Set(current);
+                        if (next.has(name)) next.delete(name); else next.add(name);
+                        // If all are now checked, collapse back to null (= "all").
+                        return next.size === allNames.length ? null : next;
+                      });
                     }}
+                    onSelectAll={() => setActiveSkills(null)}
                   />
                 </div>
               </div>
