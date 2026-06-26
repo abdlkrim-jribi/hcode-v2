@@ -179,7 +179,16 @@ class JsonRpcDaemon:
         task: str = params.get("task", "")
         thread_id: str = params.get("thread_id") or f"gui_{abs(hash(task))}"
         work_dir: Optional[str] = params.get("work_dir") or None
-        self._current_task = asyncio.create_task(self._run_task(req_id, task, thread_id, work_dir))
+        # active_skills: list of skill names the agent should load, or None = all.
+        # Validate: must be a non-empty list of strings; anything else → None (all).
+        raw_skills = params.get("active_skills")
+        active_skills: Optional[list[str]] = (
+            [s for s in raw_skills if isinstance(s, str)] or None
+            if isinstance(raw_skills, list) else None
+        )
+        self._current_task = asyncio.create_task(
+            self._run_task(req_id, task, thread_id, work_dir, active_skills)
+        )
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
         name: str = params.get("workflow", "")
@@ -188,7 +197,7 @@ class JsonRpcDaemon:
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
-    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None) -> None:
+    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
 
@@ -209,10 +218,14 @@ class JsonRpcDaemon:
             # the same thread_id. persist=True routes state through the SQLite
             # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
             # across tasks and are resumable — matching the CLI.
-            # Evict the cached agent if the user opened a different folder
-            # (work_dir changed) — the backend root_dir is baked in at build time.
+            # Evict the cached agent when either work_dir OR active_skills changes —
+            # both are baked into the agent at build time (backend root_dir and the
+            # skills middleware allowlist respectively).
+            skills_key = frozenset(active_skills) if active_skills else None
             cached = self._agents.get(thread_id)
-            if cached is not None and cached["work_dir"] != work_dir:
+            if cached is not None and (
+                cached["work_dir"] != work_dir or cached["skills_key"] != skills_key
+            ):
                 cached = None
                 del self._agents[thread_id]
             if cached is None:
@@ -223,8 +236,11 @@ class JsonRpcDaemon:
                     session_id=thread_id,
                     persist=True,
                     work_dir=work_dir,
+                    active_skills=list(skills_key) if skills_key else None,
                 )
-                self._agents[thread_id] = {"agent": agent, "work_dir": work_dir}
+                self._agents[thread_id] = {
+                    "agent": agent, "work_dir": work_dir, "skills_key": skills_key,
+                }
             else:
                 agent = cached["agent"]
             last_text = ""

@@ -109,6 +109,7 @@ async def create_hcode_agent(
     persist: bool = True,
     work_dir: str | None = None,
     interrupt_on: dict | None = None,
+    active_skills: list[str] | None = None,
 ):
     """Assemble the full HCode v2 agent from environment config."""
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
@@ -160,12 +161,20 @@ async def create_hcode_agent(
         middleware.append(SafetyGuardMiddleware())
     # skills_dir=None → resolve the built-in skills install-relative (CWD-independent)
     # so the agent sees them no matter where it runs (incl. after the daemon chdir's
-    # into work_dir). The vendored HCodeSkillsMiddleware takes a SINGLE dir, so we
-    # pass the built-in root here; the user-facing union (built-in + project-local)
-    # is surfaced by the daemon/CLI list_skills paths. An explicit skills_dir wins.
+    # into work_dir). An explicit skills_dir wins.
     from hcode_v2.skills_path import builtin_skills_dir
     resolved_skills_dir = skills_dir if skills_dir is not None else str(builtin_skills_dir())
-    middleware.append(HCodeSkillsMiddleware(skills_dir=resolved_skills_dir))
+    # active_skills: None or [] → load ALL skills (no footgun from accidental empty list).
+    # A non-empty list → load only the named skills via SelectiveSkillsMiddleware, which
+    # subclasses the vendored HCodeSkillsMiddleware without editing vendored code.
+    effective = active_skills if active_skills else None
+    if effective:
+        from hcode_v2.agent.selective_skills import SelectiveSkillsMiddleware
+        middleware.append(SelectiveSkillsMiddleware(
+            skills_dir=resolved_skills_dir, allow=frozenset(effective),
+        ))
+    else:
+        middleware.append(HCodeSkillsMiddleware(skills_dir=resolved_skills_dir))
     middleware.append(WorkflowMiddleware(workflows_dir=workflows_dir))
     # Route the model OFF the deepagents builtin mutating file tools and onto
     # hcode's own edit/write/multi_edit, which return response_format=

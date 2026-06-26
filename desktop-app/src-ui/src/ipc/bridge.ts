@@ -326,10 +326,17 @@ export async function getDaemonHealth(): Promise<DaemonInfo> {
 
 // ── Task commands ─────────────────────────────────────────────────────────────
 
-export async function runTask(task: string, mode: 'planning' | 'fast', autonomous: boolean, threadId?: string, workDir?: string): Promise<void> {
+export async function runTask(
+    task: string, mode: 'planning' | 'fast', autonomous: boolean,
+    threadId?: string, workDir?: string,
+    activeSkills?: string[] | null,
+): Promise<void> {
     const params: Record<string, unknown> = { task, mode, autonomous };
-    if (threadId) params.thread_id = threadId;   // daemon resumes/creates this session (persist=True)
-    if (workDir)  params.work_dir  = workDir;    // folder the user opened; absent = daemon falls back to cwd
+    if (threadId) params.thread_id = threadId;
+    if (workDir)  params.work_dir  = workDir;
+    // Only send active_skills when it's a non-null, non-empty subset.
+    // Omitting it (or sending null) tells the daemon to load all skills.
+    if (activeSkills && activeSkills.length > 0) params.active_skills = activeSkills;
     return (await getInvoke())('run_task', params) as Promise<void>;
 }
 export async function abortTask(): Promise<void> {

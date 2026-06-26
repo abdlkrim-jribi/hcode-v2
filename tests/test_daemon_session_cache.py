@@ -50,3 +50,37 @@ def test_run_task_builds_agent_once_per_thread(monkeypatch, restore_stdout):
         assert builder.call_count == 2
 
     asyncio.run(_drive())
+
+
+def test_run_task_evicts_agent_when_active_skills_change(monkeypatch, restore_stdout):
+    """Changing active_skills mid-session forces a rebuild (baked in at build time)."""
+    builder = AsyncMock(return_value=_FakeAgent())
+    monkeypatch.setattr("hcode_v2.agent.factory.create_hcode_agent", builder)
+
+    daemon = JsonRpcDaemon(mock=False)
+
+    async def _drive() -> None:
+        # First call: no skills filter (None = all).
+        await daemon._run_task(1, "task", "tid", active_skills=None)
+        assert builder.call_count == 1
+        assert builder.call_args.kwargs["active_skills"] is None
+
+        # Same skills → reuse the cached agent.
+        await daemon._run_task(2, "task", "tid", active_skills=None)
+        assert builder.call_count == 1
+
+        # Different skills → evict + rebuild.
+        await daemon._run_task(3, "task", "tid", active_skills=["clean-code"])
+        assert builder.call_count == 2
+        assert builder.call_args.kwargs["active_skills"] == ["clean-code"]
+
+        # Same selection again → reuse.
+        await daemon._run_task(4, "task", "tid", active_skills=["clean-code"])
+        assert builder.call_count == 2
+
+        # Reset to all (None) → evict + rebuild.
+        await daemon._run_task(5, "task", "tid", active_skills=None)
+        assert builder.call_count == 3
+        assert builder.call_args.kwargs["active_skills"] is None
+
+    asyncio.run(_drive())
