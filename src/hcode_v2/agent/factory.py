@@ -100,7 +100,7 @@ def _build_env_block(work_dir: str) -> str:
 
 
 async def create_hcode_agent(
-    skills_dir: str = ".hcode/skills",
+    skills_dir: str | None = None,
     workflows_dir: str = ".hcode/workflows",
     mcp_config: str = ".hcode/mcp_config.json",
     enable_pev: bool = True,
@@ -158,7 +158,14 @@ async def create_hcode_agent(
         middleware.append(PEVMiddleware(diagnostics_provider=verify_diagnostics_addendum))
     if enable_safety:
         middleware.append(SafetyGuardMiddleware())
-    middleware.append(HCodeSkillsMiddleware(skills_dir=skills_dir))
+    # skills_dir=None → resolve the built-in skills install-relative (CWD-independent)
+    # so the agent sees them no matter where it runs (incl. after the daemon chdir's
+    # into work_dir). The vendored HCodeSkillsMiddleware takes a SINGLE dir, so we
+    # pass the built-in root here; the user-facing union (built-in + project-local)
+    # is surfaced by the daemon/CLI list_skills paths. An explicit skills_dir wins.
+    from hcode_v2.skills_path import builtin_skills_dir
+    resolved_skills_dir = skills_dir if skills_dir is not None else str(builtin_skills_dir())
+    middleware.append(HCodeSkillsMiddleware(skills_dir=resolved_skills_dir))
     middleware.append(WorkflowMiddleware(workflows_dir=workflows_dir))
     # Route the model OFF the deepagents builtin mutating file tools and onto
     # hcode's own edit/write/multi_edit, which return response_format=

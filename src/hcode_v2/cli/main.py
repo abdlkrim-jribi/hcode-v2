@@ -732,11 +732,10 @@ def handle_chat_command(cmd: str, ctx) -> ChatCommandResult:
         _render_chat_config(ctx.console, ctx.config)
         return ChatCommandResult(handled=True)
     if name == "/skills":
-        skills = [
-            d.name
-            for d in Path(".hcode/skills").iterdir()
-            if d.is_dir() and (d / "SKILL.md").exists()
-        ] if Path(".hcode/skills").is_dir() else []
+        # Built-in (install-relative) + project-local (cwd/.hcode/skills) union, so
+        # built-in skills list from any working directory — not just the repo.
+        from hcode_v2.skills_path import default_skills_dirs, list_skill_names
+        skills = list_skill_names(default_skills_dirs())
         HCodeDisplay(ctx.console).show_skills(skills)
         return ChatCommandResult(handled=True)
     if name == "/workflows":
@@ -914,17 +913,15 @@ def mcp_status() -> None:
 
 
 @cli.command()
-@click.option("--dir", "skills_dir", default=".hcode/skills", show_default=True, help="Skills directory.")
-def skill(skills_dir: str) -> None:
-    """List available HCode skills."""
+@click.option("--dir", "skills_dir", default=None,
+              help="Skills directory (overrides the built-in + project-local default).")
+def skill(skills_dir: str | None) -> None:
+    """List available HCode skills (built-in + project-local)."""
+    from hcode_v2.skills_path import default_skills_dirs, list_skill_names
     display = HCodeDisplay()
-    root = Path(skills_dir)
-    skills = (
-        [d.name for d in sorted(root.iterdir()) if d.is_dir() and (d / "SKILL.md").exists()]
-        if root.is_dir()
-        else []
-    )
-    display.show_skills(skills)
+    # Explicit --dir scans just that dir; otherwise union of built-in + project-local.
+    dirs = [skills_dir] if skills_dir is not None else default_skills_dirs()
+    display.show_skills(list_skill_names(dirs))
 
 
 # ---------------------------------------------------------------------------

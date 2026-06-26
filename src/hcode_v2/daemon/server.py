@@ -47,7 +47,7 @@ class JsonRpcDaemon:
     def __init__(
         self,
         mock: bool = False,
-        skills_dir: str = ".hcode/skills",
+        skills_dir: str | None = None,
         workflows_dir: str = ".hcode/workflows",
         mcp_config: str = ".hcode/mcp_config.json",
     ) -> None:
@@ -111,12 +111,13 @@ class JsonRpcDaemon:
         self.send_response(req_id, {"status": "running", "mock": self._mock})
 
     async def _handle_list_skills(self, req_id: Any) -> None:
-        root = Path(self._skills_dir)
-        skills = (
-            sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "SKILL.md").exists())
-            if root.is_dir() else []
-        )
-        self.send_response(req_id, {"skills": skills})
+        # Explicit --skills-dir override scans just that dir; otherwise return the
+        # union of built-in (install-relative) + project-local skills. The daemon
+        # has already os.chdir'd into work_dir, so cwd here IS work_dir and
+        # default_skills_dirs() picks up <work_dir>/.hcode/skills as project-local.
+        from hcode_v2.skills_path import default_skills_dirs, list_skill_names
+        dirs = [self._skills_dir] if self._skills_dir is not None else default_skills_dirs()
+        self.send_response(req_id, {"skills": list_skill_names(dirs)})
 
     async def _handle_list_workflows(self, req_id: Any) -> None:
         root = Path(self._workflows_dir)

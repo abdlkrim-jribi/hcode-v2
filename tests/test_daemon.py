@@ -62,14 +62,21 @@ def test_health(daemon):
 
 # ── list_skills ───────────────────────────────────────────────────────────────
 
-def test_list_skills_empty(daemon):
+# The built-in skills are install-relative, so they appear from ANY work_dir
+# (incl. the daemon's chdir into the user's folder). We assert their presence via
+# a known member rather than the full set, so adding a built-in won't break these.
+_BUILTIN_SKILL = "clean-code"
+
+
+def test_list_skills_includes_builtins_from_any_workdir(daemon):
+    # daemon runs with --work-dir = an empty tmp_path; built-ins must still appear.
     _send(daemon, "list_skills", req_id=2)
     resp = _read(daemon)
     assert resp["id"] == 2
-    assert resp["result"]["skills"] == []
+    assert _BUILTIN_SKILL in resp["result"]["skills"]
 
 
-def test_list_skills_finds_skill_dirs(tmp_path: Path):
+def test_list_skills_merges_project_local_with_builtins(tmp_path: Path):
     skill = tmp_path / ".hcode" / "skills" / "my-skill"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("# My Skill")
@@ -77,21 +84,26 @@ def test_list_skills_finds_skill_dirs(tmp_path: Path):
     try:
         _send(proc, "list_skills", req_id=20)
         resp = _read(proc)
-        assert resp["result"]["skills"] == ["my-skill"]
+        skills = resp["result"]["skills"]
+        # Project-local skill appears ALONGSIDE the built-ins (union).
+        assert "my-skill" in skills
+        assert _BUILTIN_SKILL in skills
     finally:
         proc.terminate()
         proc.wait(timeout=5)
 
 
 def test_list_skills_ignores_non_skill_dirs(tmp_path: Path):
-    # directory without SKILL.md should be excluded
+    # A project-local directory without SKILL.md is excluded; built-ins remain.
     non_skill = tmp_path / ".hcode" / "skills" / "not-a-skill"
     non_skill.mkdir(parents=True)
     proc = _start_daemon(tmp_path)
     try:
         _send(proc, "list_skills", req_id=21)
         resp = _read(proc)
-        assert resp["result"]["skills"] == []
+        skills = resp["result"]["skills"]
+        assert "not-a-skill" not in skills
+        assert _BUILTIN_SKILL in skills
     finally:
         proc.terminate()
         proc.wait(timeout=5)
