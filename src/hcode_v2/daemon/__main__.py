@@ -28,7 +28,9 @@ def main() -> None:
     )
     parser.add_argument("--mock", action="store_true", help="Use mock agent (no LLM calls)")
     parser.add_argument("--work-dir", default=None, metavar="DIR", help="Set working directory")
-    parser.add_argument("--skills-dir", default=".hcode/skills", metavar="DIR")
+    # Default None → the daemon resolves built-in (install-relative) + project-local
+    # skills via skills_path.default_skills_dirs(). An explicit path still overrides.
+    parser.add_argument("--skills-dir", default=None, metavar="DIR")
     parser.add_argument("--workflows-dir", default=".hcode/workflows", metavar="DIR")
     parser.add_argument("--mcp-config", default=".hcode/mcp_config.json", metavar="FILE")
     args = parser.parse_args()
