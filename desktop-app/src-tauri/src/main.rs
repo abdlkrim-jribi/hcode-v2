@@ -69,11 +69,13 @@ async fn daemon_health(state: State<'_, AppState>) -> Result<DaemonInfo, String>
 async fn run_task(
     task: String, mode: String, autonomous: bool,
     thread_id: Option<String>, work_dir: Option<String>,
+    active_skills: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut params = serde_json::json!({ "task": task, "mode": mode, "autonomous": autonomous });
-    if let Some(tid) = thread_id { params["thread_id"] = serde_json::json!(tid); }
-    if let Some(wd)  = work_dir  { params["work_dir"]  = serde_json::json!(wd); }
+    if let Some(tid)    = thread_id    { params["thread_id"]    = serde_json::json!(tid); }
+    if let Some(wd)     = work_dir     { params["work_dir"]     = serde_json::json!(wd); }
+    if let Some(skills) = active_skills { params["active_skills"] = serde_json::json!(skills); }
     rpc(&state, "run_task", params)
 }
 #[tauri::command]
