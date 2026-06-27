@@ -20,8 +20,35 @@ never written to the on-disk MCP config.
 from __future__ import annotations
 
 import os
+import tempfile
 
 from deepagents.mcp.client import KNOWN_SERVERS, MCPClient, MCPServerConfig
+
+
+class McpConnectError(RuntimeError):
+    """A connect failure carrying the server's captured stderr for diagnosis."""
+
+
+def _summarize_connect_failure(config: MCPServerConfig, stderr: str, exc: BaseException) -> str:
+    """Build an actionable connect-error message from captured stderr.
+
+    Turns the MCP SDK's opaque "Connection closed" into something a user can act
+    on — most importantly, a missing npm/PyPI package (the #1 native failure).
+    """
+    cmd = " ".join([config.command, *config.args]).strip()
+    text = (stderr or "").strip()
+    low = text.lower()
+    if "e404" in low or "not in this registry" in low or "404 not found" in low:
+        hint = (f"Package not found — `{cmd}` resolves to a registry package that "
+                f"does not exist. Check the server's command/args.")
+    elif "enoent" in low or "not recognized" in low or "cannot find the file" in low:
+        hint = (f"Command not found — `{config.command}` is not on PATH (is node/uv "
+                f"installed and visible to the daemon?).")
+    else:
+        hint = f"`{cmd}` failed to start."
+    tail = text.splitlines()[-6:] if text else []
+    detail = ("\n" + "\n".join(tail)) if tail else f" ({type(exc).__name__}: {exc})"
+    return f"{hint}{detail}"
 
 
 class _ArgCleaningMCPClient(MCPClient):
@@ -86,5 +113,89 @@ def env_injecting_client_factory(config: MCPServerConfig) -> MCPClient:
     """
     merged = resolve_server_env(config.server_id, config.env)
     return _ArgCleaningMCPClient(
+        MCPServerConfig(config.server_id, config.command, config.args, merged)
+    )
+
+
+class _CapturingMCPClient(_ArgCleaningMCPClient):
+    """MCPClient that captures the server's stderr and reports it on failure.
+
+    The vendored ``connect()`` lets the spawned server's stderr flow to the
+    daemon's own stderr (``errlog=sys.stderr``), so a failed connect surfaces only
+    the SDK's opaque ``"Connection closed"``. This subclass redirects the
+    subprocess stderr to a temp file and, on ANY connect failure, raises
+    :class:`McpConnectError` with that captured text — turning "Connection closed"
+    into "Package not found: …". The body mirrors the vendored ``connect()`` but
+    threads ``errlog`` through; ``libs/deepagents`` stays untouched.
+
+    Robustness: catches ``BaseException`` (anyio teardown can raise an
+    ``ExceptionGroup``/``BaseException`` when the process dies mid-handshake) so a
+    bad server never escapes to crash the daemon loop — but re-raises
+    ``KeyboardInterrupt``/``SystemExit`` untouched.
+    """
+
+    async def connect(self) -> None:
+        if self._session is not None:
+            await self._discover_tools()
+            return
+
+        from contextlib import AsyncExitStack
+
+        from mcp import ClientSession  # type: ignore[import-not-found]
+        from mcp.client.stdio import (  # type: ignore[import-not-found]
+            StdioServerParameters,
+            stdio_client,
+        )
+
+        params = StdioServerParameters(
+            command=self.config.command,
+            args=self.config.args,
+            env=self.config.env or None,
+        )
+        errlog = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        self._session_stack = AsyncExitStack()
+        try:
+            read, write = await self._session_stack.enter_async_context(
+                stdio_client(params, errlog=errlog)
+            )
+            self._session = await self._session_stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await self._session.initialize()
+            await self._discover_tools()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - intentionally broad
+            try:
+                errlog.seek(0)
+                captured = errlog.read()
+            except Exception:  # pragma: no cover
+                captured = ""
+            # Best-effort teardown in THIS task (same task connect ran in).
+            try:
+                await self._session_stack.aclose()
+            except BaseException:  # noqa: BLE001 - cleanup must not mask the cause
+                pass
+            self._session = None
+            self._session_stack = None
+            raise McpConnectError(
+                _summarize_connect_failure(self.config, captured, exc)
+            ) from exc
+        finally:
+            try:
+                errlog.close()
+            except Exception:  # pragma: no cover
+                pass
+
+
+def capturing_client_factory(config: MCPServerConfig) -> MCPClient:
+    """Like :func:`env_injecting_client_factory` but with stderr capture on failure.
+
+    Used by the daemon's interactive connect path so a failed connect returns a
+    diagnostic message (the real npm/PyPI error) instead of "Connection closed".
+    Keeps the env-injection + arg-cleaning behavior via the shared base class.
+    """
+    merged = resolve_server_env(config.server_id, config.env)
+    return _CapturingMCPClient(
         MCPServerConfig(config.server_id, config.command, config.args, merged)
     )

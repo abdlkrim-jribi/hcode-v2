@@ -152,20 +152,31 @@ class JsonRpcDaemon:
     # existing CLI/.env path, preserved). Secure token entry is Phase 2.
 
     def _resolve_mcp_factory(self) -> Any:
-        """Return the MCP client factory (test-injected, else env-injecting)."""
+        """Return the MCP client factory (test-injected, else stderr-capturing)."""
         if self._mcp_client_factory is not None:
             return self._mcp_client_factory
-        # HCode-side factory (NOT vendored): injects each server's env_required
-        # secrets from os.environ and strips None-valued tool args. Same factory
-        # the agent uses, so the daemon's live connection mirrors the agent's.
-        from hcode_v2.agent.mcp_env import env_injecting_client_factory
-        return env_injecting_client_factory
+        # HCode-side factory (NOT vendored): injects env_required secrets, strips
+        # None tool args, AND captures the server's stderr so a failed connect
+        # reports the REAL reason (e.g. an npm/PyPI 404) instead of the SDK's
+        # opaque "Connection closed".
+        from hcode_v2.agent.mcp_env import capturing_client_factory
+        return capturing_client_factory
+
+    def _catalog(self) -> dict[str, dict]:
+        """Vendored KNOWN_SERVERS with HCode command corrections overlaid.
+
+        The vendored catalog ships fetch/sqlite commands pointing at npm packages
+        that don't exist (npx → 404). merged_catalog() corrects them to the real
+        uvx-based servers without editing libs/deepagents.
+        """
+        from hcode_v2.agent.mcp_catalog import merged_catalog
+        return merged_catalog()
 
     def _server_def(self, name: str) -> dict | None:
-        """Resolve a server definition from the KNOWN_SERVERS catalog or config."""
-        from deepagents.mcp.client import KNOWN_SERVERS
-        if name in KNOWN_SERVERS:
-            return KNOWN_SERVERS[name]
+        """Resolve a server definition from the corrected catalog or config."""
+        catalog = self._catalog()
+        if name in catalog:
+            return catalog[name]
         return self._configured_servers().get(name)
 
     def _configured_servers(self) -> dict[str, dict]:
@@ -185,8 +196,7 @@ class JsonRpcDaemon:
         "needs-auth" (Phase 2). An empty result means we can connect in Phase 1.
         """
         import os
-        from deepagents.mcp.client import KNOWN_SERVERS
-        required = (KNOWN_SERVERS.get(name) or server_def or {}).get("env_required", [])
+        required = (self._catalog().get(name) or server_def or {}).get("env_required", [])
         env_block = (server_def or {}).get("env", {})
         return [v for v in required if v not in os.environ and v not in env_block]
 
@@ -217,13 +227,13 @@ class JsonRpcDaemon:
         return {"status": "disconnected", "toolCount": 0}
 
     async def _handle_list_mcp_servers(self, req_id: Any) -> None:
-        from deepagents.mcp.client import KNOWN_SERVERS
+        catalog = self._catalog()
         configured = self._configured_servers()
         # Catalog ∪ configured (config wins for command/args/env/description).
-        names = list(dict.fromkeys([*KNOWN_SERVERS.keys(), *configured.keys()]))
+        names = list(dict.fromkeys([*catalog.keys(), *configured.keys()]))
         servers: list[dict] = []
         for name in names:
-            defn = {**(KNOWN_SERVERS.get(name) or {}), **configured.get(name, {})}
+            defn = {**(catalog.get(name) or {}), **configured.get(name, {})}
             row = {
                 "name": name,
                 "description": defn.get("description", ""),
@@ -251,16 +261,24 @@ class JsonRpcDaemon:
             return
 
         # Persist to config FIRST so the agent picks the server up on its next
-        # build (cache eviction keys on the config signature). Only KNOWN presets
-        # are written here; already-configured custom servers are left as-is.
-        from deepagents.mcp.client import KNOWN_SERVERS, MCPClientManager
-        if name in KNOWN_SERVERS:
-            MCPClientManager(config_path=self._mcp_config).add_server_to_config(name, KNOWN_SERVERS[name])
+        # build (cache eviction keys on the config signature). Persist the
+        # CORRECTED def (from the catalog) so the agent spawns the working command
+        # too. Only KNOWN presets are written; configured customs are left as-is.
+        from deepagents.mcp.client import MCPClientManager
+        if name in self._catalog():
+            MCPClientManager(config_path=self._mcp_config).add_server_to_config(name, server_def)
 
-        # Actually connect: real subprocess + init handshake + list_tools.
+        # Actually connect: real subprocess + init handshake + list_tools. Catch
+        # BaseException (not just Exception): when a server dies mid-handshake the
+        # anyio stdio teardown can raise an ExceptionGroup/BaseException, and one
+        # bad server must never escape to crash the daemon's read loop. The
+        # capturing client folds the server's stderr into a diagnostic message.
+        # KeyboardInterrupt/SystemExit are re-raised inside the client.
         try:
             client = await self._connect_live(name, server_def)
-        except Exception as exc:  # noqa: BLE001
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - isolate per-server failures
             self._mcp_errors[name] = str(exc)
             self._mcp_clients.pop(name, None)
             self.send_response(req_id, error={"code": -32000, "message": str(exc)})
