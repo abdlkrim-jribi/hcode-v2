@@ -121,9 +121,43 @@ async fn run_workflow(workflow: String, state: State<'_, AppState>) -> Result<()
 async fn list_mcp_servers(state: State<'_, AppState>) -> Result<(), String> {
     rpc(&state, "list_mcp_servers", serde_json::json!({}))
 }
+// Map an MCP server id to the env var its subprocess expects for auth. None for
+// no-auth servers. Phase 2: GitHub/GitLab use a Personal Access Token.
+fn mcp_token_env_var(server: &str) -> Option<&'static str> {
+    match server {
+        "github" => Some("GITHUB_TOKEN"),
+        "gitlab" => Some("GITLAB_TOKEN"),
+        _ => None,
+    }
+}
+
+// Read a saved MCP auth token from the OS keychain (account `mcp:<server>`, the
+// same store the UI's secure field writes via save_api_key). Returns the env var
+// name + token, or None for a no-auth server or when no token has been saved.
+// SECURITY: the token is read here in Rust and handed straight to the daemon —
+// it never enters the JS/React layer and is never logged.
+fn read_mcp_secret(server: &str) -> Option<(&'static str, String)> {
+    let var = mcp_token_env_var(server)?;
+    let account = format!("mcp:{}", server);
+    match keyring::Entry::new("hcode-v2-desktop", &account).ok()?.get_password() {
+        Ok(token) if !token.is_empty() => Some((var, token)),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 async fn connect_mcp_server(server: String, state: State<'_, AppState>) -> Result<(), String> {
-    rpc(&state, "connect_mcp_server", serde_json::json!({ "server": server }))
+    let mut params = serde_json::json!({ "server": server });
+    // SECURITY (Phase 2): inject the keychain token as `secrets` over the daemon's
+    // stdin (which is never echoed to stdout/events). The daemon registers it for
+    // redaction and injects it into the spawned server's env only. No-auth servers
+    // get no `secrets` key, so Phase 1 connects are unchanged.
+    if let Some((var, token)) = read_mcp_secret(&server) {
+        let mut secrets = serde_json::Map::new();
+        secrets.insert(var.to_string(), serde_json::Value::String(token));
+        params["secrets"] = serde_json::Value::Object(secrets);
+    }
+    rpc(&state, "connect_mcp_server", params)
 }
 #[tauri::command]
 async fn disconnect_mcp_server(server: String, state: State<'_, AppState>) -> Result<(), String> {
