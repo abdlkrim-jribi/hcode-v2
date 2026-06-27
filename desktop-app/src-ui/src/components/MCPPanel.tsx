@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react';
 import * as ipc from '../ipc/bridge';
 
-export type MCPStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
+export type MCPStatus = 'connected' | 'disconnected' | 'connecting' | 'error' | 'needs-auth';
 
 export interface MCPServerInfo {
     id: string;
@@ -14,7 +14,9 @@ export interface MCPServerInfo {
     description: string;
     status: MCPStatus;
     toolCount: number;
+    configured?: boolean;
     errorMessage?: string;
+    tools?: string[];
 }
 
 const statusColor: Record<MCPStatus, string> = {
@@ -22,11 +24,20 @@ const statusColor: Record<MCPStatus, string> = {
     disconnected: 'var(--fg-secondary, #888)',
     connecting:   'var(--accent, #3b82f6)',
     error:        'var(--semantic-error, #ef4444)',
+    'needs-auth': 'var(--semantic-warning, #f59e0b)',
 };
 
-const statusLabel: Record<MCPStatus, string> = {
-    connected: 'Connected', disconnected: 'Disconnected', connecting: 'Connecting…', error: 'Error',
-};
+// Label differs by state. A not-connected server reads "Configured" when it's in
+// the config file, else "Available". needs-auth points the user at Phase 2.
+function statusLabel(s: MCPServerInfo): string {
+    switch (s.status) {
+        case 'connected':   return s.toolCount > 0 ? `Connected · ${s.toolCount} tools` : 'Connected';
+        case 'connecting':  return 'Connecting…';
+        case 'error':       return 'Error';
+        case 'needs-auth':  return 'Needs auth (Phase 2)';
+        default:            return s.configured ? 'Configured' : 'Available';
+    }
+}
 
 export default function MCPPanel() {
     const [servers, setServers] = useState<MCPServerInfo[]>([]);
@@ -42,15 +53,27 @@ export default function MCPPanel() {
 
     const handleToggle = async (server: MCPServerInfo) => {
         if (busyId) return;
+        // Phase 1: token servers can't be connected from the UI yet (Phase 2).
+        if (server.status === 'needs-auth') return;
         setBusyId(server.id);
         setServers(prev => prev.map(s => s.id === server.id ? { ...s, status: 'connecting' } : s));
         try {
             if (server.status === 'connected') {
                 await ipc.disconnectMcpServer(server.name);
-                setServers(prev => prev.map(s => s.id === server.id ? { ...s, status: 'disconnected' } : s));
+                setServers(prev => prev.map(s => s.id === server.id
+                    ? { ...s, status: 'disconnected', toolCount: 0, configured: false, tools: undefined } : s));
             } else {
-                await ipc.connectMcpServer(server.name);
-                setServers(prev => prev.map(s => s.id === server.id ? { ...s, status: 'connected' } : s));
+                // The daemon returns the REAL outcome: 'connected' with a live tool
+                // count, or 'needs-auth' (don't claim connected). A real failure throws.
+                const res = await ipc.connectMcpServer(server.name);
+                setServers(prev => prev.map(s => s.id === server.id ? {
+                    ...s,
+                    status: (res.status as MCPStatus) ?? 'connected',
+                    toolCount: res.toolCount ?? 0,
+                    tools: res.tools,
+                    configured: res.status === 'connected',
+                    errorMessage: res.status === 'needs-auth' ? res.message : undefined,
+                } : s));
             }
         } catch (err) {
             setServers(prev => prev.map(s => s.id === server.id ? { ...s, status: 'error', errorMessage: String(err) } : s));
@@ -81,12 +104,19 @@ export default function MCPPanel() {
                             <span style={{ fontWeight: 500, fontSize: 'var(--text-xs)' }}>{server.name}</span>
                             <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
                                 <span style={{ fontSize: 'var(--text-xs)', color: statusColor[server.status] }}>
-                                    {statusLabel[server.status]}
+                                    {statusLabel(server)}
                                 </span>
                                 <button
                                     className="hcode-btn hcode-btn--primary"
                                     style={{ padding: '2px 8px', fontSize: 'var(--text-xs)' }}
-                                    disabled={server.status === 'connecting' || busyId !== null}
+                                    disabled={
+                                        server.status === 'connecting'
+                                        || server.status === 'needs-auth'
+                                        || busyId !== null
+                                    }
+                                    title={server.status === 'needs-auth'
+                                        ? 'Secure token entry lands in Phase 2'
+                                        : undefined}
                                     onClick={() => handleToggle(server)}
                                 >
                                     {server.status === 'connected' ? 'Disconnect' : 'Connect'}
@@ -96,6 +126,15 @@ export default function MCPPanel() {
                         {server.description && (
                             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-secondary)', marginTop: 2 }}>
                                 {server.description}
+                            </div>
+                        )}
+                        {server.errorMessage && (
+                            <div style={{
+                                fontSize: 'var(--text-xs)',
+                                color: statusColor[server.status === 'error' ? 'error' : 'needs-auth'],
+                                marginTop: 2,
+                            }}>
+                                {server.errorMessage}
                             </div>
                         )}
                     </li>

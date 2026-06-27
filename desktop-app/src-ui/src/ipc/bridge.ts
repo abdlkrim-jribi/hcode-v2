@@ -148,10 +148,12 @@ const MOCK_WORKFLOWS = [
     { name: 'full-feature', description: 'Plan → implement → test → document', stepCount: 4, lastRun: null, status: 'idle' },
     { name: 'quick-fix',    description: 'Patch, verify, commit',              stepCount: 3, lastRun: null, status: 'idle' },
 ];
+// Phase 1 shape: status + toolCount + configured + (needs-auth for token servers).
+// github is needs-auth (token entry = Phase 2); no-auth servers are connectable.
 const MOCK_MCP_SERVERS = [
-    { id: 'filesystem', name: 'filesystem', description: 'Local file access',   status: 'disconnected', toolCount: 5 },
-    { id: 'github',     name: 'github',     description: 'GitHub integration',  status: 'disconnected', toolCount: 8 },
-    { id: 'brave',      name: 'brave',      description: 'Web search',          status: 'disconnected', toolCount: 1 },
+    { id: 'filesystem', name: 'filesystem', description: 'Local file access',  status: 'disconnected', toolCount: 0, configured: false },
+    { id: 'web-fetch',  name: 'web-fetch',  description: 'Fetch URLs, scrape', status: 'disconnected', toolCount: 0, configured: false },
+    { id: 'github',     name: 'github',     description: 'GitHub integration', status: 'needs-auth',   toolCount: 0, configured: false },
 ];
 
 // Mock session list. "default" is included so the UI's filter (which hides the
@@ -288,7 +290,13 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'list_workflows':    return { workflows: MOCK_WORKFLOWS };
         case 'list_sessions':     return { sessions: MOCK_SESSIONS };
         case 'list_mcp_servers':  return { servers: MOCK_MCP_SERVERS };
-        case 'connect_mcp_server':    return { status: 'connected',    server: args?.server ?? '' };
+        case 'connect_mcp_server': {
+            const server = String(args?.server ?? '');
+            // Mirror the daemon: token servers report needs-auth; others connect
+            // with a realistic live tool count.
+            if (server === 'github') return { status: 'needs-auth', server, message: 'Requires GITHUB_TOKEN — Phase 2.' };
+            return { status: 'connected', server, toolCount: 4, tools: ['read', 'write', 'list', 'search'].map(t => `mcp_${server}_${t}`) };
+        }
         case 'disconnect_mcp_server': return { status: 'disconnected', server: args?.server ?? '' };
         case 'run_workflow': { _fireMock(`run workflow ${args?.workflow ?? 'workflow'}`); return undefined; }
         case 'run_task': {
@@ -438,16 +446,37 @@ export async function listSessions(): Promise<string[]> {
 export async function runWorkflow(workflow: string): Promise<void> {
     return (await getInvoke())('run_workflow', { workflow }) as Promise<void>;
 }
-export async function listMcpServers() {
+/** One MCP server row from the daemon (Phase 1: live status + tool count). */
+export interface McpServerRow {
+    id: string; name: string; description: string;
+    status: string; toolCount: number;
+    configured: boolean; errorMessage?: string; tools?: string[];
+}
+/** Daemon reply to connect_mcp_server. status is 'connected' | 'needs-auth'
+ *  on success; a real connect failure throws (rejected RPC) instead. */
+export interface McpConnectResult {
+    status: string; server: string;
+    toolCount?: number; tools?: string[]; message?: string;
+}
+
+export async function listMcpServers(): Promise<McpServerRow[]> {
     const res = await queryRpc('list_mcp_servers') as { servers?: unknown[] };
-    return ((res?.servers ?? []) as Array<{ name: string; description?: string; status?: string; toolCount?: number }>)
-        .map(s => ({ id: s.name, name: s.name, description: s.description ?? '', status: (s.status ?? 'disconnected') as string, toolCount: s.toolCount ?? 0 }));
+    return ((res?.servers ?? []) as Array<{
+        name: string; description?: string; status?: string; toolCount?: number;
+        configured?: boolean; errorMessage?: string; tools?: string[];
+    }>).map(s => ({
+        id: s.name, name: s.name, description: s.description ?? '',
+        status: (s.status ?? 'disconnected') as string, toolCount: s.toolCount ?? 0,
+        configured: s.configured ?? false, errorMessage: s.errorMessage, tools: s.tools,
+    }));
 }
-export async function connectMcpServer(server: string): Promise<void> {
-    await (await getInvoke())('connect_mcp_server', { server });
+export async function connectMcpServer(server: string): Promise<McpConnectResult> {
+    // queryRpc so native awaits the daemon's real response (tool count / error)
+    // instead of the immediate Rust () return (#94 correlator).
+    return (await queryRpc('connect_mcp_server', { server })) as McpConnectResult;
 }
-export async function disconnectMcpServer(server: string): Promise<void> {
-    await (await getInvoke())('disconnect_mcp_server', { server });
+export async function disconnectMcpServer(server: string): Promise<{ status: string; server: string }> {
+    return (await queryRpc('disconnect_mcp_server', { server })) as { status: string; server: string };
 }
 
 // ── File system ───────────────────────────────────────────────────────────────
