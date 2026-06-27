@@ -295,6 +295,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
             if (typeof args?.provider === 'string') _mockSavedKeys.add(args.provider);
             return undefined;
         case 'get_api_key':       return null;
+        case 'has_api_key':       return _mockSavedKeys.has(String(args?.provider ?? ''));
         case 'list_skills':       return { skills: MOCK_SKILLS };
         case 'list_workflows':    return { workflows: MOCK_WORKFLOWS };
         case 'list_sessions':     return { sessions: MOCK_SESSIONS };
@@ -561,6 +562,12 @@ export async function saveApiKey(provider: string, key: string): Promise<void> {
 }
 export async function getApiKey(provider: string): Promise<string | null> {
     return (await getInvoke())('get_api_key', { provider }) as Promise<string | null>;
+}
+/** Presence-only check: is a token saved for this provider? Returns a boolean and
+ *  NEVER the secret — used to show "auth ready" for a previously-saved MCP token
+ *  (incl. across sessions) without pulling the token into JS. */
+export async function hasApiKey(provider: string): Promise<boolean> {
+    return (await getInvoke())('has_api_key', { provider }) as Promise<boolean>;
 }
 
 // ── Event listeners ───────────────────────────────────────────────────────────

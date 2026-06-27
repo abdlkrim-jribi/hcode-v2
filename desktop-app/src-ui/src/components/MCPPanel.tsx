@@ -28,15 +28,22 @@ const statusColor: Record<MCPStatus, string> = {
 };
 
 // Label differs by state. A not-connected server reads "Configured" when it's in
-// the config file, else "Available". needs-auth prompts for a secure token.
-function statusLabel(s: MCPServerInfo): string {
+// the config file, else "Available". A needs-auth server with a saved token reads
+// "Auth ready" (not "Needs auth") so the label never contradicts the saved state.
+function statusLabel(s: MCPServerInfo, authReady: boolean): string {
     switch (s.status) {
         case 'connected':   return s.toolCount > 0 ? `Connected · ${s.toolCount} tools` : 'Connected';
         case 'connecting':  return 'Connecting…';
         case 'error':       return 'Error';
-        case 'needs-auth':  return 'Needs auth';
+        case 'needs-auth':  return authReady ? 'Auth ready' : 'Needs auth';
         default:            return s.configured ? 'Configured' : 'Available';
     }
+}
+
+// A needs-auth server whose token is already saved to the keychain is "auth ready":
+// the native connect command will read the token and inject it.
+function isAuthReady(s: MCPServerInfo, savedTokens: Set<string>): boolean {
+    return s.status === 'needs-auth' && savedTokens.has(s.id);
 }
 
 export default function MCPPanel() {
@@ -53,7 +60,20 @@ export default function MCPPanel() {
 
     useEffect(() => {
         ipc.listMcpServers()
-            .then(s => setServers(s.map(sv => ({ ...sv, status: (sv.status as MCPStatus) ?? 'disconnected' }))))
+            .then(async list => {
+                const mapped = list.map(sv => ({ ...sv, status: (sv.status as MCPStatus) ?? 'disconnected' }));
+                setServers(mapped);
+                // Detect tokens saved in a PRIOR session so a needs-auth server
+                // shows "Auth ready" on open (not a contradictory "Needs auth").
+                // Presence-only — the token value is never read into JS.
+                const needAuth = mapped.filter(s => s.status === 'needs-auth');
+                const present = await Promise.all(
+                    needAuth.map(s => ipc.hasApiKey(`mcp:${s.name}`).catch(() => false))
+                );
+                const saved = new Set<string>();
+                needAuth.forEach((s, i) => { if (present[i]) saved.add(s.id); });
+                if (saved.size) setSavedTokens(prev => new Set([...prev, ...saved]));
+            })
             .catch(() => setServers([]))
             .finally(() => setLoading(false));
     }, []);
@@ -84,13 +104,25 @@ export default function MCPPanel() {
                 // The daemon returns the REAL outcome: 'connected' with a live tool
                 // count, or 'needs-auth' (don't claim connected). A real failure throws.
                 const res = await ipc.connectMcpServer(server.name);
+                const stillNeedsAuth = res.status === 'needs-auth';
+                // If we connected with a SAVED token but the daemon still reports
+                // needs-auth, the saved token wasn't accepted/available — say so
+                // honestly and reopen the field (don't tell them to "add a token"
+                // they already added). Otherwise show the daemon's message verbatim.
+                const tokenWasSaved = savedTokens.has(server.id);
+                if (stillNeedsAuth && tokenWasSaved) {
+                    setSavedTokens(prev => { const n = new Set(prev); n.delete(server.id); return n; });
+                }
                 setServers(prev => prev.map(s => s.id === server.id ? {
                     ...s,
                     status: (res.status as MCPStatus) ?? 'connected',
                     toolCount: res.toolCount ?? 0,
                     tools: res.tools,
                     configured: res.status === 'connected',
-                    errorMessage: res.status === 'needs-auth' ? res.message : undefined,
+                    errorMessage: !stillNeedsAuth ? undefined
+                        : tokenWasSaved
+                            ? 'Saved token was not accepted. Re-enter it below.'
+                            : res.message,
                 } : s));
             }
         } catch (err) {
@@ -112,7 +144,9 @@ export default function MCPPanel() {
             {loading && <div style={{ color: 'var(--fg-secondary)', fontSize: 'var(--text-xs)' }}>Loading…</div>}
 
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                {servers.map(server => (
+                {servers.map(server => {
+                  const authReady = isAuthReady(server, savedTokens);
+                  return (
                     <li key={server.id} style={{
                         padding: 'var(--space-2)', marginBottom: 'var(--space-1)',
                         border: '1px solid var(--border-default)', borderRadius: 4,
@@ -121,8 +155,9 @@ export default function MCPPanel() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <span style={{ fontWeight: 500, fontSize: 'var(--text-xs)' }}>{server.name}</span>
                             <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-                                <span style={{ fontSize: 'var(--text-xs)', color: statusColor[server.status] }}>
-                                    {statusLabel(server)}
+                                <span style={{ fontSize: 'var(--text-xs)',
+                                    color: authReady ? 'var(--accent, #3b82f6)' : statusColor[server.status] }}>
+                                    {statusLabel(server, authReady)}
                                 </span>
                                 <button
                                     className="hcode-btn hcode-btn--primary"
@@ -153,8 +188,17 @@ export default function MCPPanel() {
                         {server.status === 'needs-auth' && (
                             <div style={{ marginTop: 'var(--space-2)' }}>
                                 {savedTokens.has(server.id) ? (
-                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--semantic-success, #22c55e)' }}>
-                                        ● Token saved to OS keychain — click Connect.
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-2)' }}>
+                                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--semantic-success, #22c55e)' }}>
+                                            ● Token saved to OS keychain — click Connect.
+                                        </span>
+                                        <button
+                                            className="hcode-btn hcode-btn--secondary"
+                                            style={{ padding: '2px 8px', fontSize: 'var(--text-xs)' }}
+                                            onClick={() => setSavedTokens(prev => { const n = new Set(prev); n.delete(server.id); return n; })}
+                                        >
+                                            Replace
+                                        </button>
                                     </div>
                                 ) : (
                                     <>
@@ -200,7 +244,8 @@ export default function MCPPanel() {
                             </div>
                         )}
                     </li>
-                ))}
+                  );
+                })}
             </ul>
         </div>
     );

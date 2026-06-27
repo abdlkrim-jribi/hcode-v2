@@ -217,6 +217,17 @@ async fn get_api_key(provider: String) -> Result<Option<String>, String> {
         Err(e)                     => Err(e.to_string()),
     }
 }
+// Presence-only check: does the keychain hold a value for this provider? Returns
+// a bool and NEVER the secret itself, so the UI can show "auth ready" for a
+// previously-saved token (incl. across sessions) without pulling it into JS.
+#[tauri::command]
+async fn has_api_key(provider: String) -> Result<bool, String> {
+    match keyring::Entry::new("hcode-v2-desktop", &provider).map_err(|e| e.to_string())?.get_password() {
+        Ok(k)                        => Ok(!k.is_empty()),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e)                       => Err(e.to_string()),
+    }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -248,7 +259,7 @@ fn main() {
             list_skills, list_workflows, run_workflow,
             list_mcp_servers, connect_mcp_server, disconnect_mcp_server,
             open_folder_dialog, list_directory, read_file, write_file,
-            save_api_key, get_api_key,
+            save_api_key, get_api_key, has_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("error running HCode v2 Desktop");
