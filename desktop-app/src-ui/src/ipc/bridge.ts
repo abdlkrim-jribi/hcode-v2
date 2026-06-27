@@ -135,8 +135,14 @@ async function wsListen(
 // ── Mock transport ────────────────────────────────────────────────────────────
 
 const MOCK_SKILLS = [
-    { name: 'python-expert', description: 'Deep Python expertise',   category: 'Languages', lastUsed: null },
-    { name: 'test-writer',   description: 'Writes pytest test suites', category: 'Testing',  lastUsed: null },
+    { name: 'clean-code',              description: 'Clean code principles',             category: 'Quality',  lastUsed: null },
+    { name: 'code-review',             description: 'Structured code review',            category: 'Quality',  lastUsed: null },
+    { name: 'concise-planning',        description: 'Efficient planning approach',       category: 'Planning', lastUsed: null },
+    { name: 'error-handling-patterns', description: 'Robust error handling',             category: 'Quality',  lastUsed: null },
+    { name: 'pytest-idioms',           description: 'Pytest best practices',             category: 'Testing',  lastUsed: null },
+    { name: 'run-tests-before-done',   description: 'Always run tests before closing',  category: 'Testing',  lastUsed: null },
+    { name: 'systematic-debugging',    description: 'Structured debugging methodology', category: 'Quality',  lastUsed: null },
+    { name: 'tdd-lite',                description: 'Lightweight TDD approach',          category: 'Testing',  lastUsed: null },
 ];
 const MOCK_WORKFLOWS = [
     { name: 'full-feature', description: 'Plan → implement → test → document', stepCount: 4, lastRun: null, status: 'idle' },
@@ -358,26 +364,82 @@ export async function rollbackAll(): Promise<void> {
     return (await getInvoke())('rollback_all') as Promise<void>;
 }
 
+// ── Tauri query correlator ────────────────────────────────────────────────────
+//
+// In native Tauri mode, the Rust rpc() helper sends a JSON-RPC request and
+// returns Ok(()) immediately.  The daemon's actual response arrives later as a
+// `daemon-message` Tauri event emitted by daemon.rs's spawn_output_reader.
+// Streaming agent events (planning_started, done, …) also arrive on the same
+// channel but carry a `type` field; JSON-RPC responses carry `jsonrpc + result/error`.
+// tauriQuery() listens for the next JSON-RPC response, resolves with its result,
+// and cleans up the listener — giving query RPCs the same await-able behaviour
+// they already have on the WS path (wsInvoke).
+
+async function tauriQuery(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { listen }  = await import('@tauri-apps/api/event');
+    return new Promise((resolve, reject) => {
+        let unlisten: (() => void) | undefined;
+        const timer = setTimeout(() => {
+            unlisten?.();
+            reject(new Error(`[Tauri] Timeout awaiting response for: ${cmd}`));
+        }, 10_000);
+        const cleanup = () => { clearTimeout(timer); unlisten?.(); };
+        listen<Record<string, unknown>>('daemon-message', event => {
+            const msg = event.payload;
+            // JSON-RPC responses have `jsonrpc` + `result` or `error`.
+            // Streaming events have `type` only — never touch those.
+            if ('jsonrpc' in msg && ('result' in msg || 'error' in msg)) {
+                cleanup();
+                if (msg.error) {
+                    const e = msg.error as { message?: string };
+                    reject(new Error(e.message ?? 'RPC error'));
+                } else {
+                    resolve(msg.result ?? null);
+                }
+            }
+        }).then(fn => {
+            unlisten = fn;
+            // Register listener BEFORE invoking so no response is missed.
+            invoke(cmd, args).catch(err => { cleanup(); reject(err as Error); });
+        });
+    });
+}
+
+/** Dispatch a query RPC through the right transport.
+ *  - Native Tauri (not mock): tauriQuery — awaits the daemon-message response.
+ *  - WS / mock / fallback:    getInvoke() as usual. */
+async function queryRpc(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+    if (isTauri && !MOCK_MODE) return tauriQuery(cmd, args);
+    return (await getInvoke())(cmd, args);
+}
+
 // ── v2 daemon methods ─────────────────────────────────────────────────────────
 
 export async function listSkills() {
-    const res = await (await getInvoke())('list_skills') as { skills: unknown[] };
-    return (res?.skills ?? []) as Array<{ name: string; description: string; category: string; lastUsed: string | null }>;
+    const res = await queryRpc('list_skills') as { skills?: unknown[] };
+    const raw = res?.skills ?? [];
+    // Daemon returns string[] (names only); mock returns full objects — normalise both.
+    return raw.map(s =>
+        typeof s === 'string'
+            ? { name: s, description: '', category: '', lastUsed: null as string | null }
+            : s as { name: string; description: string; category: string; lastUsed: string | null }
+    );
 }
 export async function listWorkflows() {
-    const res = await (await getInvoke())('list_workflows') as { workflows: unknown[] };
+    const res = await queryRpc('list_workflows') as { workflows?: unknown[] };
     return (res?.workflows ?? []) as Array<{ name: string; description: string; stepCount: number; lastRun: string | null; status: string }>;
 }
 /** Session ids from the daemon (sorted .db stems, [] if none). The UI filters out "default". */
 export async function listSessions(): Promise<string[]> {
-    const res = await (await getInvoke())('list_sessions') as { sessions?: unknown[] };
+    const res = await queryRpc('list_sessions') as { sessions?: unknown[] };
     return (res?.sessions ?? []) as string[];
 }
 export async function runWorkflow(workflow: string): Promise<void> {
     return (await getInvoke())('run_workflow', { workflow }) as Promise<void>;
 }
 export async function listMcpServers() {
-    const res = await (await getInvoke())('list_mcp_servers') as { servers: unknown[] };
+    const res = await queryRpc('list_mcp_servers') as { servers?: unknown[] };
     return ((res?.servers ?? []) as Array<{ name: string; description?: string; status?: string; toolCount?: number }>)
         .map(s => ({ id: s.name, name: s.name, description: s.description ?? '', status: (s.status ?? 'disconnected') as string, toolCount: s.toolCount ?? 0 }));
 }
