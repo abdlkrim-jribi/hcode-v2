@@ -50,6 +50,7 @@ class JsonRpcDaemon:
         skills_dir: str | None = None,
         workflows_dir: str = ".hcode/workflows",
         mcp_config: str = ".hcode/mcp_config.json",
+        mcp_client_factory: Any = None,
     ) -> None:
         self._mock = mock
         self._skills_dir = skills_dir
@@ -61,6 +62,15 @@ class JsonRpcDaemon:
         # {"agent": ..., "work_dir": str} so we can detect when the user opens
         # a different folder mid-session and evict the stale agent.
         self._agents: dict[str, Any] = {}
+        # Phase 1 live MCP: the daemon owns real connections so the panel can
+        # report actual status + tool counts (not an optimistic toggle). These
+        # are SEPARATE from the per-agent manager the factory builds at agent
+        # build time — connect here proves the server works and surfaces its
+        # tools; the agent gets its own tools when rebuilt (cache eviction below).
+        # _mcp_client_factory is injectable so tests need no real subprocess.
+        self._mcp_clients: dict[str, Any] = {}   # server_id -> connected MCPClient
+        self._mcp_errors: dict[str, str] = {}    # server_id -> last connect error
+        self._mcp_client_factory = mcp_client_factory
 
         self._real_stdout = sys.stdout
         sys.stdout = sys.stderr
@@ -129,42 +139,194 @@ class JsonRpcDaemon:
         sessions = (sorted(p.stem for p in root.glob("*.db")) if root.is_dir() else [])
         self.send_response(req_id, {"sessions": sessions})
 
+    # ── MCP: live connection management (Phase 1, no-auth servers) ─────────────
+    #
+    # The daemon owns real MCP connections so the panel reflects genuine state:
+    #   - connect spawns the server subprocess, runs the init handshake, lists
+    #     tools, and reports the live tool count (or a real error).
+    #   - list returns the catalog ∪ configured servers, each annotated with its
+    #     real status (connected / error / needs-auth / disconnected) + tool count.
+    #   - disconnect tears the live connection down (basic; full lifecycle = P3).
+    # Token-based servers (env_required) are surfaced as "needs-auth" and NOT
+    # attempted in Phase 1 unless their secret is already in os.environ (the
+    # existing CLI/.env path, preserved). Secure token entry is Phase 2.
+
+    def _resolve_mcp_factory(self) -> Any:
+        """Return the MCP client factory (test-injected, else env-injecting)."""
+        if self._mcp_client_factory is not None:
+            return self._mcp_client_factory
+        # HCode-side factory (NOT vendored): injects each server's env_required
+        # secrets from os.environ and strips None-valued tool args. Same factory
+        # the agent uses, so the daemon's live connection mirrors the agent's.
+        from hcode_v2.agent.mcp_env import env_injecting_client_factory
+        return env_injecting_client_factory
+
+    def _server_def(self, name: str) -> dict | None:
+        """Resolve a server definition from the KNOWN_SERVERS catalog or config."""
+        from deepagents.mcp.client import KNOWN_SERVERS
+        if name in KNOWN_SERVERS:
+            return KNOWN_SERVERS[name]
+        return self._configured_servers().get(name)
+
+    def _configured_servers(self) -> dict[str, dict]:
+        """Return the servers block from the on-disk MCP config ({} if none)."""
+        cfg = Path(self._mcp_config)
+        if not cfg.exists():
+            return {}
+        try:
+            return json.loads(cfg.read_text()).get("servers", {})
+        except Exception:
+            return {}
+
+    def _missing_required_env(self, name: str, server_def: dict) -> list[str]:
+        """Required env vars NOT satisfied by os.environ or the config env block.
+
+        A non-empty result means the server needs a token we don't have →
+        "needs-auth" (Phase 2). An empty result means we can connect in Phase 1.
+        """
+        import os
+        from deepagents.mcp.client import KNOWN_SERVERS
+        required = (KNOWN_SERVERS.get(name) or server_def or {}).get("env_required", [])
+        env_block = (server_def or {}).get("env", {})
+        return [v for v in required if v not in os.environ and v not in env_block]
+
+    async def _connect_live(self, name: str, server_def: dict) -> Any:
+        """Spawn + connect a live MCP client for one server; cache it. Returns it."""
+        from deepagents.mcp.client import MCPServerConfig
+        factory = self._resolve_mcp_factory()
+        client = factory(MCPServerConfig(
+            name,
+            server_def["command"],
+            server_def.get("args", []),
+            server_def.get("env", {}),
+        ))
+        await client.connect()
+        self._mcp_clients[name] = client
+        return client
+
+    def _server_status(self, name: str, server_def: dict, configured: bool) -> dict:
+        """Build one server's status row for list_mcp_servers."""
+        if name in self._mcp_clients:
+            tools = [t.name for t in self._mcp_clients[name].tools]
+            return {"status": "connected", "toolCount": len(tools), "tools": tools}
+        if name in self._mcp_errors:
+            return {"status": "error", "toolCount": 0, "errorMessage": self._mcp_errors[name]}
+        if self._missing_required_env(name, server_def):
+            return {"status": "needs-auth", "toolCount": 0}
+        # Not connected: "configured" if it's in the config file, else available.
+        return {"status": "disconnected", "toolCount": 0}
+
     async def _handle_list_mcp_servers(self, req_id: Any) -> None:
-        from deepagents.mcp.client import MCPClientManager
-        self.send_response(req_id, {"servers": MCPClientManager(config_path=self._mcp_config).list_known_servers()})
+        from deepagents.mcp.client import KNOWN_SERVERS
+        configured = self._configured_servers()
+        # Catalog ∪ configured (config wins for command/args/env/description).
+        names = list(dict.fromkeys([*KNOWN_SERVERS.keys(), *configured.keys()]))
+        servers: list[dict] = []
+        for name in names:
+            defn = {**(KNOWN_SERVERS.get(name) or {}), **configured.get(name, {})}
+            row = {
+                "name": name,
+                "description": defn.get("description", ""),
+                "configured": name in configured,
+                **self._server_status(name, defn, name in configured),
+            }
+            servers.append(row)
+        self.send_response(req_id, {"servers": servers})
 
     async def _handle_connect_mcp_server(self, req_id: Any, params: dict) -> None:
-        from deepagents.mcp.client import MCPClientManager
         name: str = params.get("server", "")
-        mgr = MCPClientManager(config_path=self._mcp_config)
-        known = mgr.get_known_server(name)
-        if known is None:
+        server_def = self._server_def(name)
+        if server_def is None:
             self.send_response(req_id, error={"code": -32602, "message": f"Unknown MCP server: {name!r}"})
             return
-        mgr.add_server_to_config(name, known)
-        self.send_response(req_id, {"status": "connected", "server": name})
+
+        # Phase 1 is no-auth only: a server needing a token we don't have is
+        # surfaced as needs-auth and NOT spawned (secure token entry = Phase 2).
+        missing = self._missing_required_env(name, server_def)
+        if missing:
+            self.send_response(req_id, {
+                "status": "needs-auth", "server": name,
+                "message": f"Requires {', '.join(missing)} — secure auth lands in Phase 2.",
+            })
+            return
+
+        # Persist to config FIRST so the agent picks the server up on its next
+        # build (cache eviction keys on the config signature). Only KNOWN presets
+        # are written here; already-configured custom servers are left as-is.
+        from deepagents.mcp.client import KNOWN_SERVERS, MCPClientManager
+        if name in KNOWN_SERVERS:
+            MCPClientManager(config_path=self._mcp_config).add_server_to_config(name, KNOWN_SERVERS[name])
+
+        # Actually connect: real subprocess + init handshake + list_tools.
+        try:
+            client = await self._connect_live(name, server_def)
+        except Exception as exc:  # noqa: BLE001
+            self._mcp_errors[name] = str(exc)
+            self._mcp_clients.pop(name, None)
+            self.send_response(req_id, error={"code": -32000, "message": str(exc)})
+            return
+
+        self._mcp_errors.pop(name, None)
+        tools = [t.name for t in client.tools]
+        self.send_response(req_id, {
+            "status": "connected", "server": name,
+            "toolCount": len(tools), "tools": tools,
+        })
 
     async def _handle_disconnect_mcp_server(self, req_id: Any, params: dict) -> None:
         name: str = params.get("server", "")
+        # Tear down the live connection if we have one (best-effort).
+        client = self._mcp_clients.pop(name, None)
+        torn_down = client is not None
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MCP disconnect of %s failed: %s", name, exc)
+        self._mcp_errors.pop(name, None)
+
+        # Remove from the on-disk config so the agent drops it on next build.
+        removed = False
         cfg = Path(self._mcp_config)
-        if not cfg.exists():
-            self.send_response(req_id, error={"code": -32602, "message": "No MCP config file found."})
-            return
-        try:
-            data = json.loads(cfg.read_text())
-            servers = data.get("servers", {})
-            if name not in servers:
-                self.send_response(req_id, error={"code": -32602, "message": f"Server {name!r} not in config."})
+        if cfg.exists():
+            try:
+                data = json.loads(cfg.read_text())
+                servers = data.get("servers", {})
+                if name in servers:
+                    del servers[name]
+                    data["servers"] = servers
+                    cfg.write_text(json.dumps(data, indent=2))
+                    removed = True
+            except Exception as exc:  # noqa: BLE001
+                self.send_response(req_id, error={"code": -32000, "message": str(exc)})
                 return
-            del servers[name]
-            data["servers"] = servers
-            cfg.write_text(json.dumps(data, indent=2))
-            self.send_response(req_id, {"status": "disconnected", "server": name})
-        except Exception as exc:
-            self.send_response(req_id, error={"code": -32000, "message": str(exc)})
+
+        if not torn_down and not removed:
+            self.send_response(req_id, error={"code": -32602, "message": f"Server {name!r} is not connected or configured."})
+            return
+        self.send_response(req_id, {"status": "disconnected", "server": name})
+
+    def _mcp_config_signature(self) -> frozenset[str]:
+        """Signature of the configured MCP servers, for agent-cache eviction.
+
+        The factory connects every server in the config at agent build time, so
+        the set of configured server names is exactly what determines which MCP
+        tools an agent ends up with. Connect adds a name, disconnect removes one;
+        either changes this signature → the cached agent evicts and rebuilds on
+        the next task → the new tools actually reach it. No MCP change → identical
+        signature → no eviction (zero regression for the no-MCP path).
+        """
+        return frozenset(self._configured_servers().keys())
 
     async def _handle_shutdown(self, req_id: Any) -> None:
         self._running = False
+        # Best-effort teardown of any live MCP subprocesses on shutdown.
+        for name, client in list(self._mcp_clients.items()):
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MCP shutdown disconnect of %s failed: %s", name, exc)
+        self._mcp_clients.clear()
         self.send_response(req_id, {"status": "shutting_down"})
 
     # ── Async task dispatch ───────────────────────────────────────────────────
@@ -218,13 +380,19 @@ class JsonRpcDaemon:
             # the same thread_id. persist=True routes state through the SQLite
             # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
             # across tasks and are resumable — matching the CLI.
-            # Evict the cached agent when either work_dir OR active_skills changes —
-            # both are baked into the agent at build time (backend root_dir and the
-            # skills middleware allowlist respectively).
+            # Evict the cached agent when work_dir, active_skills, OR the MCP
+            # config changes — all three are baked into the agent at build time
+            # (backend root_dir, the skills middleware allowlist, and the set of
+            # MCP servers whose tools the factory wires in, respectively). The
+            # MCP key makes a connect/disconnect actually reach the running agent
+            # on the next task instead of silently no-op'ing on a cached agent.
             skills_key = frozenset(active_skills) if active_skills else None
+            mcp_key = self._mcp_config_signature()
             cached = self._agents.get(thread_id)
             if cached is not None and (
-                cached["work_dir"] != work_dir or cached["skills_key"] != skills_key
+                cached["work_dir"] != work_dir
+                or cached["skills_key"] != skills_key
+                or cached["mcp_key"] != mcp_key
             ):
                 cached = None
                 del self._agents[thread_id]
@@ -239,7 +407,8 @@ class JsonRpcDaemon:
                     active_skills=list(skills_key) if skills_key else None,
                 )
                 self._agents[thread_id] = {
-                    "agent": agent, "work_dir": work_dir, "skills_key": skills_key,
+                    "agent": agent, "work_dir": work_dir,
+                    "skills_key": skills_key, "mcp_key": mcp_key,
                 }
             else:
                 agent = cached["agent"]

@@ -164,11 +164,13 @@ def test_list_mcp_servers(daemon):
     resp = _read(daemon)
     assert resp["id"] == 4
     assert isinstance(resp["result"]["servers"], list)
-    # KNOWN_SERVERS catalog is non-empty
+    # Catalog ∪ configured is non-empty
     assert len(resp["result"]["servers"]) > 0
-    # Each entry has at minimum a "name" key
+    # Each entry carries the Phase-1 status fields: name, status, toolCount.
     for s in resp["result"]["servers"]:
         assert "name" in s
+        assert s["status"] in ("connected", "disconnected", "error", "needs-auth")
+        assert "toolCount" in s
 
 
 # ── connect_mcp_server ────────────────────────────────────────────────────────
@@ -181,21 +183,18 @@ def test_connect_mcp_server_unknown_returns_error(daemon):
     assert resp["error"]["code"] == -32602
 
 
-def test_connect_mcp_server_known(tmp_path: Path):
+def test_connect_mcp_token_server_reports_needs_auth(tmp_path: Path):
+    # github needs GITHUB_TOKEN; with no token in env, Phase 1 surfaces it as
+    # needs-auth and does NOT spawn a subprocess or write the config.
     proc = _start_daemon(tmp_path)
     try:
-        # Get a real server name from the catalog
-        _send(proc, "list_mcp_servers", req_id=50)
-        servers_resp = _read(proc)
-        first_server = servers_resp["result"]["servers"][0]["name"]
-
-        _send(proc, "connect_mcp_server", {"server": first_server}, req_id=51)
+        _send(proc, "connect_mcp_server", {"server": "github"}, req_id=51)
         resp = _read(proc)
         assert resp["id"] == 51
-        assert resp["result"]["status"] == "connected"
-        assert resp["result"]["server"] == first_server
-        # Config file should be created
-        assert (tmp_path / ".hcode" / "mcp_config.json").exists()
+        assert resp["result"]["status"] == "needs-auth"
+        assert resp["result"]["server"] == "github"
+        # No config written for a needs-auth server.
+        assert not (tmp_path / ".hcode" / "mcp_config.json").exists()
     finally:
         proc.terminate()
         proc.wait(timeout=5)

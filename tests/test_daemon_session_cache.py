@@ -84,3 +84,40 @@ def test_run_task_evicts_agent_when_active_skills_change(monkeypatch, restore_st
         assert builder.call_args.kwargs["active_skills"] is None
 
     asyncio.run(_drive())
+
+
+def test_run_task_evicts_agent_when_mcp_config_changes(tmp_path, monkeypatch, restore_stdout):
+    """Connecting/disconnecting an MCP server changes the config signature →
+    the cached agent evicts and rebuilds so the new tools actually reach it."""
+    import json
+
+    builder = AsyncMock(return_value=_FakeAgent())
+    monkeypatch.setattr("hcode_v2.agent.factory.create_hcode_agent", builder)
+
+    cfg = tmp_path / "mcp.json"
+    daemon = JsonRpcDaemon(mock=False, mcp_config=str(cfg))
+
+    async def _drive() -> None:
+        # First task: no MCP servers configured.
+        await daemon._run_task(1, "task", "tid")
+        assert builder.call_count == 1
+
+        # Same (empty) MCP config → reuse the cached agent.
+        await daemon._run_task(2, "task", "tid")
+        assert builder.call_count == 1
+
+        # A server gets connected → config signature changes → evict + rebuild.
+        cfg.write_text(json.dumps({"servers": {"web-fetch": {"command": "npx", "args": []}}}))
+        await daemon._run_task(3, "task", "tid")
+        assert builder.call_count == 2
+
+        # Same config again → reuse.
+        await daemon._run_task(4, "task", "tid")
+        assert builder.call_count == 2
+
+        # Disconnect (server removed) → signature changes → evict + rebuild.
+        cfg.write_text(json.dumps({"servers": {}}))
+        await daemon._run_task(5, "task", "tid")
+        assert builder.call_count == 3
+
+    asyncio.run(_drive())
