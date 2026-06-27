@@ -28,13 +28,13 @@ const statusColor: Record<MCPStatus, string> = {
 };
 
 // Label differs by state. A not-connected server reads "Configured" when it's in
-// the config file, else "Available". needs-auth points the user at Phase 2.
+// the config file, else "Available". needs-auth prompts for a secure token.
 function statusLabel(s: MCPServerInfo): string {
     switch (s.status) {
         case 'connected':   return s.toolCount > 0 ? `Connected · ${s.toolCount} tools` : 'Connected';
         case 'connecting':  return 'Connecting…';
         case 'error':       return 'Error';
-        case 'needs-auth':  return 'Needs auth (Phase 2)';
+        case 'needs-auth':  return 'Needs auth';
         default:            return s.configured ? 'Configured' : 'Available';
     }
 }
@@ -43,6 +43,13 @@ export default function MCPPanel() {
     const [servers, setServers] = useState<MCPServerInfo[]>([]);
     const [loading, setLoading] = useState(true);
     const [busyId, setBusyId] = useState<string | null>(null);
+    // Secure token entry (Phase 2). tokenDraft holds the in-flight field value for
+    // the server being edited and is CLEARED the instant it is saved to the OS
+    // keychain — never persisted in React state, never logged, never sent in a
+    // run_task/event. savedTokens tracks only WHICH servers have a stored token
+    // (a boolean), never the value.
+    const [tokenDraft, setTokenDraft] = useState<Record<string, string>>({});
+    const [savedTokens, setSavedTokens] = useState<Set<string>>(new Set());
 
     useEffect(() => {
         ipc.listMcpServers()
@@ -51,10 +58,21 @@ export default function MCPPanel() {
             .finally(() => setLoading(false));
     }, []);
 
+    const saveToken = async (server: MCPServerInfo) => {
+        const token = tokenDraft[server.id];
+        if (!token) return;
+        // Persist to the OS keychain under "mcp:<server>" (same secure store as
+        // LLM keys). Then immediately wipe the draft so the token isn't retained.
+        await ipc.saveApiKey(`mcp:${server.name}`, token);
+        setTokenDraft(prev => ({ ...prev, [server.id]: '' }));
+        setSavedTokens(prev => new Set(prev).add(server.id));
+    };
+
     const handleToggle = async (server: MCPServerInfo) => {
         if (busyId) return;
-        // Phase 1: token servers can't be connected from the UI yet (Phase 2).
-        if (server.status === 'needs-auth') return;
+        // A needs-auth server can only connect once a token has been saved to the
+        // keychain (the native connect command reads it from there).
+        if (server.status === 'needs-auth' && !savedTokens.has(server.id)) return;
         setBusyId(server.id);
         setServers(prev => prev.map(s => s.id === server.id ? { ...s, status: 'connecting' } : s));
         try {
@@ -111,11 +129,11 @@ export default function MCPPanel() {
                                     style={{ padding: '2px 8px', fontSize: 'var(--text-xs)' }}
                                     disabled={
                                         server.status === 'connecting'
-                                        || server.status === 'needs-auth'
+                                        || (server.status === 'needs-auth' && !savedTokens.has(server.id))
                                         || busyId !== null
                                     }
-                                    title={server.status === 'needs-auth'
-                                        ? 'Secure token entry lands in Phase 2'
+                                    title={server.status === 'needs-auth' && !savedTokens.has(server.id)
+                                        ? 'Enter and save an access token first'
                                         : undefined}
                                     onClick={() => handleToggle(server)}
                                 >
@@ -128,6 +146,50 @@ export default function MCPPanel() {
                                 {server.description}
                             </div>
                         )}
+
+                        {/* Secure token field — only for token-based (needs-auth) servers.
+                            type="password" masks input; the value is wiped on save and
+                            stored only in the OS keychain. NEVER the chat composer. */}
+                        {server.status === 'needs-auth' && (
+                            <div style={{ marginTop: 'var(--space-2)' }}>
+                                {savedTokens.has(server.id) ? (
+                                    <div style={{ fontSize: 'var(--text-xs)', color: 'var(--semantic-success, #22c55e)' }}>
+                                        ● Token saved to OS keychain — click Connect.
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                                            <input
+                                                type="password"
+                                                autoComplete="off"
+                                                spellCheck={false}
+                                                placeholder={`${server.name} access token (PAT)…`}
+                                                value={tokenDraft[server.id] ?? ''}
+                                                onChange={e => setTokenDraft(prev => ({ ...prev, [server.id]: e.target.value }))}
+                                                style={{
+                                                    flex: 1, padding: 'var(--space-1) var(--space-2)',
+                                                    border: '1px solid var(--border-default)',
+                                                    background: 'var(--surface-1)', color: 'var(--fg-primary)',
+                                                    fontSize: 'var(--text-xs)', borderRadius: 3, boxSizing: 'border-box',
+                                                }}
+                                            />
+                                            <button
+                                                className="hcode-btn hcode-btn--secondary"
+                                                style={{ padding: '2px 8px', fontSize: 'var(--text-xs)' }}
+                                                disabled={!tokenDraft[server.id]}
+                                                onClick={() => saveToken(server)}
+                                            >
+                                                Save
+                                            </button>
+                                        </div>
+                                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-secondary)', marginTop: 2 }}>
+                                            Stored only in the OS credential manager. Never written to disk or sent to chat.
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
                         {server.errorMessage && (
                             <div style={{
                                 fontSize: 'var(--text-xs)',

@@ -148,13 +148,18 @@ const MOCK_WORKFLOWS = [
     { name: 'full-feature', description: 'Plan → implement → test → document', stepCount: 4, lastRun: null, status: 'idle' },
     { name: 'quick-fix',    description: 'Patch, verify, commit',              stepCount: 3, lastRun: null, status: 'idle' },
 ];
-// Phase 1 shape: status + toolCount + configured + (needs-auth for token servers).
-// github is needs-auth (token entry = Phase 2); no-auth servers are connectable.
+// Phase 1/2 shape: status + toolCount + configured + (needs-auth for token servers
+// until a token is saved). github is needs-auth; no-auth servers are connectable.
 const MOCK_MCP_SERVERS = [
     { id: 'filesystem', name: 'filesystem', description: 'Local file access',  status: 'disconnected', toolCount: 0, configured: false },
     { id: 'web-fetch',  name: 'web-fetch',  description: 'Fetch URLs, scrape', status: 'disconnected', toolCount: 0, configured: false },
     { id: 'github',     name: 'github',     description: 'GitHub integration', status: 'needs-auth',   toolCount: 0, configured: false },
 ];
+
+// Demo-only: tracks which keychain accounts (e.g. "mcp:github") have had a token
+// saved this session — the BOOLEAN only, never the token value. Lets the keyless
+// demo show a token-gated server connecting after a token is entered + saved.
+const _mockSavedKeys = new Set<string>();
 
 // Mock session list. "default" is included so the UI's filter (which hides the
 // CLI's single-shot default.db) is demoable keyless, like the real daemon returns.
@@ -284,7 +289,11 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         }
         case 'read_file':         return MOCK_FILES[String(args?.path ?? '')] ?? '# (mock) empty file\n';
         case 'write_file':        return undefined;
-        case 'save_api_key':      return undefined;
+        case 'save_api_key':
+            // Demo only: remember WHICH providers were saved (never the value) so
+            // the keyless demo can show a token-gated server connecting after save.
+            if (typeof args?.provider === 'string') _mockSavedKeys.add(args.provider);
+            return undefined;
         case 'get_api_key':       return null;
         case 'list_skills':       return { skills: MOCK_SKILLS };
         case 'list_workflows':    return { workflows: MOCK_WORKFLOWS };
@@ -292,9 +301,15 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'list_mcp_servers':  return { servers: MOCK_MCP_SERVERS };
         case 'connect_mcp_server': {
             const server = String(args?.server ?? '');
-            // Mirror the daemon: token servers report needs-auth; others connect
-            // with a realistic live tool count.
-            if (server === 'github') return { status: 'needs-auth', server, message: 'Requires GITHUB_TOKEN — Phase 2.' };
+            // Mirror the daemon: a token server stays needs-auth UNTIL a token has
+            // been saved (to mcp:<server>), then connects with its tool count.
+            if (server === 'github') {
+                if (!_mockSavedKeys.has('mcp:github')) {
+                    return { status: 'needs-auth', server, message: 'Requires GITHUB_TOKEN. Add a token in the secure field.' };
+                }
+                return { status: 'connected', server, toolCount: 26,
+                         tools: ['create_issue', 'search_repositories', 'get_file_contents'].map(t => `mcp_github_${t}`) };
+            }
             return { status: 'connected', server, toolCount: 4, tools: ['read', 'write', 'list', 'search'].map(t => `mcp_${server}_${t}`) };
         }
         case 'disconnect_mcp_server': return { status: 'disconnected', server: args?.server ?? '' };

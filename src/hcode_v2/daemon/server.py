@@ -30,11 +30,51 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Minimum length for a value to be treated as a redactable secret. Guards against
+# accidentally redacting short, common substrings (e.g. a 4-char URL fragment).
+_MIN_SECRET_LEN = 8
+_REDACTED = "***REDACTED***"
+
+
+class _SecretRedactingFilter(logging.Filter):
+    """Logging filter that scrubs registered secret values from every log record.
+
+    The daemon routes logging to stderr; this guarantees a token can never land
+    in a log line even if some library logs an env dump or an error containing it.
+    Backed by the SAME live set the stdout redactor uses, so registering a secret
+    once protects both streams.
+    """
+
+    def __init__(self, secrets: set[str]) -> None:
+        super().__init__()
+        self._secrets = secrets
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._secrets:
+            try:
+                msg = record.getMessage()
+                redacted = _redact_secrets(msg, self._secrets)
+                if redacted != msg:
+                    record.msg = redacted
+                    record.args = ()
+            except Exception:  # pragma: no cover - never let logging crash the daemon
+                pass
+        return True
+
+
+def _redact_secrets(text: str, secrets: set[str]) -> str:
+    """Replace every registered secret value in *text* with a redaction marker."""
+    for secret in secrets:
+        if secret and secret in text:
+            text = text.replace(secret, _REDACTED)
+    return text
 
 
 class JsonRpcDaemon:
@@ -72,13 +112,42 @@ class JsonRpcDaemon:
         self._mcp_errors: dict[str, str] = {}    # server_id -> last connect error
         self._mcp_client_factory = mcp_client_factory
 
+        # SECURITY: MCP auth tokens (Phase 2) are registered here so they are
+        # scrubbed from EVERYTHING the daemon emits — stdout (JSON-RPC responses +
+        # daemon-message events) via _write, and stderr (logs) via the filter
+        # below. The token itself lives only in the OS keychain (UI side) and,
+        # transiently, in os.environ + the spawned server's subprocess env. It is
+        # never written to disk, the config, or any tracked file.
+        self._secret_values: set[str] = set()
+        # Attach the redactor to the root logger AND its handlers. Handler-level
+        # filters are essential: a filter on the root LOGGER is NOT applied to
+        # records propagated up from child loggers (deepagents, mcp, …), but a
+        # filter on the root HANDLERS is. __main__ installs a stderr StreamHandler
+        # via basicConfig before the daemon is built, so it exists here.
+        _redactor = _SecretRedactingFilter(self._secret_values)
+        _root = logging.getLogger()
+        _root.addFilter(_redactor)
+        for _h in _root.handlers:
+            _h.addFilter(_redactor)
+
         self._real_stdout = sys.stdout
         sys.stdout = sys.stderr
 
     # ── Wire I/O ──────────────────────────────────────────────────────────────
 
+    def _register_secret(self, value: str) -> None:
+        """Register a secret so it is redacted from all daemon output."""
+        if isinstance(value, str) and len(value) >= _MIN_SECRET_LEN:
+            self._secret_values.add(value)
+
     def _write(self, obj: dict) -> None:
-        self._real_stdout.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        # Defense-in-depth: redact any registered secret from the serialized line
+        # before it reaches the real stdout (which the UI reads verbatim). Even an
+        # accidental echo of a token in a response/event/error cannot leak here.
+        line = json.dumps(obj, ensure_ascii=True)
+        if self._secret_values:
+            line = _redact_secrets(line, self._secret_values)
+        self._real_stdout.write(line + "\n")
         self._real_stdout.flush()
 
     def send_response(self, req_id: Any, result: Any = None, error: Optional[dict] = None) -> None:
@@ -243,6 +312,30 @@ class JsonRpcDaemon:
             servers.append(row)
         self.send_response(req_id, {"servers": servers})
 
+    def _apply_mcp_secrets(self, params: dict) -> None:
+        """Phase 2: apply auth tokens supplied securely with a connect request.
+
+        The native app's Tauri ``connect_mcp_server`` command reads the token from
+        the OS keychain (account ``mcp:<server>``) and passes it here as
+        ``params["secrets"] = {ENV_VAR: token}`` — over the daemon's stdin, which
+        is NEVER echoed to stdout/events. Each value is (1) registered with the
+        redaction filter so it can never appear in any daemon output, and (2)
+        placed into ``os.environ`` (in-memory only). The existing
+        ``resolve_server_env`` then injects it into the spawned server's env, and
+        the same os.environ is read by the agent's factory on rebuild — so the
+        token reaches both without ever touching disk, the config, or git.
+
+        On the dev/CLI path there is no keychain and no ``secrets`` param; the
+        token comes from ``.env`` → ``os.environ`` exactly as before.
+        """
+        secrets = params.get("secrets")
+        if not isinstance(secrets, dict):
+            return
+        for var, value in secrets.items():
+            if isinstance(var, str) and isinstance(value, str) and value:
+                self._register_secret(value)   # redact from all output FIRST
+                os.environ[var] = value         # in-memory; never written to disk
+
     async def _handle_connect_mcp_server(self, req_id: Any, params: dict) -> None:
         name: str = params.get("server", "")
         server_def = self._server_def(name)
@@ -250,13 +343,18 @@ class JsonRpcDaemon:
             self.send_response(req_id, error={"code": -32602, "message": f"Unknown MCP server: {name!r}"})
             return
 
-        # Phase 1 is no-auth only: a server needing a token we don't have is
-        # surfaced as needs-auth and NOT spawned (secure token entry = Phase 2).
+        # Phase 2: apply any securely-supplied auth token BEFORE the needs-auth
+        # check, so a token-based server (github/gitlab) now passes the gate and
+        # connects. Registered for redaction the instant it arrives.
+        self._apply_mcp_secrets(params)
+
+        # A server still missing a required token after secrets are applied is
+        # surfaced as needs-auth and NOT spawned (no token to authenticate with).
         missing = self._missing_required_env(name, server_def)
         if missing:
             self.send_response(req_id, {
                 "status": "needs-auth", "server": name,
-                "message": f"Requires {', '.join(missing)} — secure auth lands in Phase 2.",
+                "message": f"Requires {', '.join(missing)}. Add the token in the server's secure field.",
             })
             return
 
