@@ -259,3 +259,96 @@ def test_mcp_config_signature_tracks_configured_servers(tmp_path, restore_stdout
     cfg.write_text(json.dumps({"servers": {"web-fetch": {"command": "npx", "args": []}}}))
     # File with one server → signature contains it.
     assert daemon._mcp_config_signature() == frozenset({"web-fetch"})
+
+
+# ── native-connect fixes: corrected catalog + diagnostic errors ──────────────────
+
+def test_default_factory_is_capturing(tmp_path, restore_stdout):
+    """The daemon's default MCP factory captures stderr so failures are diagnosable."""
+    from hcode_v2.agent.mcp_env import capturing_client_factory
+    daemon = JsonRpcDaemon(mock=False, mcp_config=str(tmp_path / "mcp.json"))
+    assert daemon._resolve_mcp_factory() is capturing_client_factory
+
+
+def test_connect_persists_corrected_uvx_command(tmp_path, monkeypatch, restore_stdout):
+    """Connecting web-fetch writes the CORRECTED uvx command to config (not the
+    vendored 404 npm package) so the agent spawns the working server too."""
+    import json
+    cfg = tmp_path / "mcp.json"
+    daemon = JsonRpcDaemon(
+        mock=False, mcp_config=str(cfg), mcp_client_factory=_factory(tools=["fetch"]),
+    )
+    _capture(daemon, monkeypatch)
+
+    asyncio.run(daemon._handle_connect_mcp_server(1, {"server": "web-fetch"}))
+
+    entry = json.loads(cfg.read_text())["servers"]["web-fetch"]
+    assert entry["command"] == "uvx"
+    assert entry["args"] == ["mcp-server-fetch"]
+
+
+def test_connect_failure_returns_diagnostic_not_connection_closed(tmp_path, monkeypatch, restore_stdout):
+    """A failed connect surfaces the capturing client's diagnostic message
+    (the real reason), not the SDK's opaque 'Connection closed'."""
+    from hcode_v2.agent.mcp_env import McpConnectError
+    diagnostic = "Package not found — `uvx mcp-server-fetch` resolves to a package that does not exist."
+
+    def _raising_factory(config):
+        class _C:
+            config = None
+            async def connect(self):
+                raise McpConnectError(diagnostic)
+            @property
+            def tools(self):
+                return []
+            async def disconnect(self):
+                pass
+        return _C()
+
+    daemon = JsonRpcDaemon(
+        mock=False, mcp_config=str(tmp_path / "mcp.json"), mcp_client_factory=_raising_factory,
+    )
+    responses = _capture(daemon, monkeypatch)
+
+    asyncio.run(daemon._handle_connect_mcp_server(1, {"server": "web-fetch"}))
+
+    _id, result, error = responses[-1]
+    assert error is not None
+    assert "not found" in error["message"].lower()
+    assert error["message"] != "Connection closed"
+    # And the error is remembered for list_mcp_servers' error status.
+    assert "web-fetch" in daemon._mcp_errors
+
+
+def test_one_bad_server_does_not_break_the_daemon(tmp_path, monkeypatch, restore_stdout):
+    """A connect that raises a BaseException (anyio teardown) is isolated — the
+    daemon keeps serving (next request still handled)."""
+    class _Boom(BaseException):
+        pass
+
+    def _boom_factory(config):
+        class _C:
+            async def connect(self):
+                raise _Boom("anyio teardown exploded")
+            @property
+            def tools(self):
+                return []
+            async def disconnect(self):
+                pass
+        return _C()
+
+    daemon = JsonRpcDaemon(
+        mock=False, mcp_config=str(tmp_path / "mcp.json"), mcp_client_factory=_boom_factory,
+    )
+    responses = _capture(daemon, monkeypatch)
+
+    async def _drive():
+        # The bad connect must NOT propagate out of the handler.
+        await daemon._handle_connect_mcp_server(1, {"server": "web-fetch"})
+        # The daemon still handles the next request.
+        await daemon._handle_health(2)
+
+    asyncio.run(_drive())
+
+    _id, result, _error = responses[-1]
+    assert result["status"] == "running"  # health still works

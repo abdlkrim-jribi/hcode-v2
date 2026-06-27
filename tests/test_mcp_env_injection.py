@@ -28,6 +28,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from deepagents.mcp.client import MCPClient, MCPServerConfig
 
 from hcode_v2.agent.mcp_env import env_injecting_client_factory, resolve_server_env
@@ -136,3 +138,57 @@ def test_env_injection_still_works_on_cleaning_client(monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     client = env_injecting_client_factory(_gh_config())
     assert client.config.env["GITHUB_TOKEN"] == "x"
+
+
+# ── connect-failure stderr summarization (native diagnosability) ───────────────
+
+from hcode_v2.agent.mcp_env import (  # noqa: E402
+    McpConnectError,
+    _summarize_connect_failure,
+    capturing_client_factory,
+)
+
+
+def _cfg(command="npx", args=None) -> MCPServerConfig:
+    return MCPServerConfig("web-fetch", command, args or ["-y", "@x/server-fetch"], {})
+
+
+def test_summarize_detects_missing_package() -> None:
+    # An npm 404 must become an actionable "package not found" message — this is
+    # the real native failure that previously showed only "Connection closed".
+    stderr = ("npm error code E404\n"
+              "npm error 404 Not Found - GET https://registry.npmjs.org/@x%2fserver-fetch\n"
+              "npm error 404  '@x/server-fetch@*' is not in this registry.")
+    msg = _summarize_connect_failure(_cfg(), stderr, RuntimeError("Connection closed"))
+    assert "not found" in msg.lower()
+    assert "registry" in msg.lower()  # the captured stderr tail is included
+
+
+def test_summarize_detects_missing_command() -> None:
+    msg = _summarize_connect_failure(
+        _cfg(command="uvx"), "'uvx' is not recognized as an internal or external command",
+        RuntimeError("Connection closed"),
+    )
+    assert "not found" in msg.lower()
+
+
+def test_summarize_falls_back_to_exception_when_no_stderr() -> None:
+    msg = _summarize_connect_failure(_cfg(), "", RuntimeError("boom"))
+    assert "boom" in msg
+
+
+def test_capturing_client_factory_builds_capturing_client(monkeypatch) -> None:
+    from hcode_v2.agent.mcp_env import _CapturingMCPClient
+    client = capturing_client_factory(_cfg())
+    assert isinstance(client, _CapturingMCPClient)
+
+
+async def test_capturing_client_raises_diagnostic_on_bad_command() -> None:
+    # A command that cannot start (bogus binary) must raise McpConnectError with
+    # a diagnostic message, NOT hang and NOT a bare "Connection closed". Fast:
+    # the spawn fails immediately, no network/download.
+    client = capturing_client_factory(
+        MCPServerConfig("broken", "hcode-no-such-binary-xyz", [], {})
+    )
+    with pytest.raises(McpConnectError):
+        await client.connect()
