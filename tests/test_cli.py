@@ -792,6 +792,137 @@ def test_chat_shows_final_text_from_stream(tmp_path: Path, monkeypatch) -> None:
     assert "hi back" in result.output
 
 
+# --- selectable skills (--skills flag + /skills interactive) -----------------
+
+
+def test_run_exposes_skills_flag() -> None:
+    result = runner.invoke(cli, ["run", "--help"])
+    assert result.exit_code == 0
+    assert "--skills" in result.output
+
+
+def test_run_passes_skills_to_agent(monkeypatch) -> None:
+    """--skills clean-code,tdd-lite → active_skills=['clean-code','tdd-lite']."""
+    captured: dict = {}
+
+    class _FakeMsg:
+        content = "done"
+
+    async def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+
+        class _A:
+            async def ainvoke(self, *a, **kw):
+                return {"messages": [_FakeMsg()]}
+
+        return _A()
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    result = runner.invoke(cli, ["run", "--skills", "clean-code,tdd-lite", "do it"])
+    assert result.exit_code == 0, result.output
+    assert captured.get("active_skills") == ["clean-code", "tdd-lite"]
+
+
+def test_run_no_skills_flag_passes_none_to_agent(monkeypatch) -> None:
+    """Omitting --skills → active_skills=None (all skills)."""
+    captured: dict = {}
+
+    class _FakeMsg:
+        content = "done"
+
+    async def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+
+        class _A:
+            async def ainvoke(self, *a, **kw):
+                return {"messages": [_FakeMsg()]}
+
+        return _A()
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    runner.invoke(cli, ["run", "do it"])
+    assert captured.get("active_skills") is None
+
+
+def test_run_empty_skills_string_passes_none(monkeypatch) -> None:
+    """--skills '' (empty) → treated as all (footgun guard)."""
+    captured: dict = {}
+
+    class _FakeMsg:
+        content = "done"
+
+    async def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+
+        class _A:
+            async def ainvoke(self, *a, **kw):
+                return {"messages": [_FakeMsg()]}
+
+        return _A()
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    runner.invoke(cli, ["run", "--skills", "", "do it"])
+    assert captured.get("active_skills") is None
+
+
+def test_chat_skills_interactive_rebuilds_agent_on_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """/skills on a TTY triggers multi-select; changing selection rebuilds the agent."""
+    monkeypatch.chdir(tmp_path)
+    build_calls: list[dict] = []
+
+    async def fake_create_agent(**kwargs):
+        build_calls.append(dict(kwargs))
+        return _FakeAgent()
+
+    async def fake_select(_console, _all_skills, _current):
+        return ["clean-code"]  # simulate user picking just clean-code
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    monkeypatch.setattr(cli_main, "_select_skills_interactive", fake_select)
+    monkeypatch.setattr(cli_main, "_is_interactive_tty", lambda: True)
+    monkeypatch.setattr(
+        cli_main, "build_chat_session",
+        lambda **_: _FakePromptSession(["/skills", "/exit"]),
+    )
+
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    # Initial build (no filter) + rebuild after /skills change.
+    assert len(build_calls) == 2, f"expected 2 agent builds, got {len(build_calls)}"
+    assert build_calls[0].get("active_skills") is None
+    assert build_calls[1].get("active_skills") == ["clean-code"]
+
+
+def test_chat_skills_interactive_no_rebuild_when_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """/skills cancel or same selection → no agent rebuild."""
+    monkeypatch.chdir(tmp_path)
+    build_calls: list[dict] = []
+
+    async def fake_create_agent(**kwargs):
+        build_calls.append(dict(kwargs))
+        return _FakeAgent()
+
+    async def fake_select(_console, _all_skills, current):
+        return current  # simulate Esc / no change
+
+    monkeypatch.setattr(cli_main, "create_hcode_agent", fake_create_agent)
+    monkeypatch.setattr(cli_main, "_select_skills_interactive", fake_select)
+    monkeypatch.setattr(cli_main, "_is_interactive_tty", lambda: True)
+    monkeypatch.setattr(
+        cli_main, "build_chat_session",
+        lambda **_: _FakePromptSession(["/skills", "/exit"]),
+    )
+
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    # Only the initial build — selection unchanged → no rebuild.
+    assert len(build_calls) == 1
+
+
 # --- live turn renderer ------------------------------------------------------
 #
 # Unit tests for LiveTurnRenderer: feed synthetic raw astream_events dicts, no
