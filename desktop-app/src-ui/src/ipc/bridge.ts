@@ -104,7 +104,7 @@ function _getWs(): Promise<WebSocket> {
     return _wsConnecting;
 }
 
-async function wsInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+async function wsInvoke(cmd: string, args?: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
     const socket = await _getWs();
     const id = String(++_wsRequestId);
     return new Promise((resolve, reject) => {
@@ -115,7 +115,7 @@ async function wsInvoke(cmd: string, args?: Record<string, unknown>): Promise<un
                 _wsPending.delete(id);
                 reject(new Error(`[WS] Timeout: ${cmd}`));
             }
-        }, 30_000);
+        }, timeoutMs);
     });
 }
 
@@ -383,7 +383,7 @@ export async function rollbackAll(): Promise<void> {
 // and cleans up the listener — giving query RPCs the same await-able behaviour
 // they already have on the WS path (wsInvoke).
 
-async function tauriQuery(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+async function tauriQuery(cmd: string, args?: Record<string, unknown>, timeoutMs = 10_000): Promise<unknown> {
     const { invoke } = await import('@tauri-apps/api/core');
     const { listen }  = await import('@tauri-apps/api/event');
     return new Promise((resolve, reject) => {
@@ -391,7 +391,7 @@ async function tauriQuery(cmd: string, args?: Record<string, unknown>): Promise<
         const timer = setTimeout(() => {
             unlisten?.();
             reject(new Error(`[Tauri] Timeout awaiting response for: ${cmd}`));
-        }, 10_000);
+        }, timeoutMs);
         const cleanup = () => { clearTimeout(timer); unlisten?.(); };
         listen<Record<string, unknown>>('daemon-message', event => {
             const msg = event.payload;
@@ -414,13 +414,22 @@ async function tauriQuery(cmd: string, args?: Record<string, unknown>): Promise<
     });
 }
 
-/** Dispatch a query RPC through the right transport.
+/** Dispatch a query RPC through the right transport, with an optional timeout.
  *  - Native Tauri (not mock): tauriQuery — awaits the daemon-message response.
- *  - WS / mock / fallback:    getInvoke() as usual. */
-async function queryRpc(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
-    if (isTauri && !MOCK_MODE) return tauriQuery(cmd, args);
+ *  - WS (not mock):           wsInvoke directly so the timeout is honored.
+ *  - mock / fallback:         getInvoke() (timeout irrelevant).
+ *  A long timeout is needed for connect_mcp_server: the first run of an
+ *  npx/uvx-based MCP server downloads the package, which can take a minute. */
+async function queryRpc(cmd: string, args?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+    if (isTauri && !MOCK_MODE) return tauriQuery(cmd, args, timeoutMs ?? 10_000);
+    if (WS_URL && !MOCK_MODE)  return wsInvoke(cmd, args, timeoutMs ?? 30_000);
     return (await getInvoke())(cmd, args);
 }
+
+// First-run npx/uvx MCP servers download their package on connect — allow for a
+// cold download (filesystem pulls npm, fetch pulls ~45 PyPI packages) before the
+// UI calls it a failure. A slow first connect is not an error.
+const MCP_CONNECT_TIMEOUT_MS = 120_000;
 
 // ── v2 daemon methods ─────────────────────────────────────────────────────────
 
@@ -472,11 +481,13 @@ export async function listMcpServers(): Promise<McpServerRow[]> {
 }
 export async function connectMcpServer(server: string): Promise<McpConnectResult> {
     // queryRpc so native awaits the daemon's real response (tool count / error)
-    // instead of the immediate Rust () return (#94 correlator).
-    return (await queryRpc('connect_mcp_server', { server })) as McpConnectResult;
+    // instead of the immediate Rust () return (#94 correlator). The long timeout
+    // covers a cold npx/uvx first-run download — a slow connect is not a failure.
+    return (await queryRpc('connect_mcp_server', { server }, MCP_CONNECT_TIMEOUT_MS)) as McpConnectResult;
 }
 export async function disconnectMcpServer(server: string): Promise<{ status: string; server: string }> {
-    return (await queryRpc('disconnect_mcp_server', { server })) as { status: string; server: string };
+    // Disconnect can wait on the stdio shutdown handshake; give it generous room.
+    return (await queryRpc('disconnect_mcp_server', { server }, 30_000)) as { status: string; server: string };
 }
 
 // ── File system ───────────────────────────────────────────────────────────────
