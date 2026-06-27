@@ -68,6 +68,15 @@ def _phase_label(phase: str) -> str:
     return "PEV" if phase == "plan" else phase
 
 
+def _is_interactive_tty() -> bool:
+    """Return True only when both stdin and stdout are real TTYs.
+
+    Extracted as a module-level function so tests can monkeypatch it without
+    touching ``sys.stdin``/``sys.stdout`` directly.
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _enable_pev(no_pev: bool, fast: bool) -> bool:
     """``--no-pev`` or ``--fast`` both disable the Plan-Execute-Verify loop
     (one-shot)."""
@@ -111,7 +120,13 @@ def _validate_workdir(workdir: str | None) -> None:
         )
 
 
-def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) -> None:
+def _run_agent_task(
+    task: str,
+    workdir: str | None,
+    *,
+    enable_pev: bool = True,
+    active_skills: list[str] | None = None,
+) -> None:
     """Run a single pre-built TASK through the agent and display the result.
 
     This is the shared single-shot run path used by ``run``, ``analyze``, and
@@ -124,6 +139,7 @@ def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) 
         task: Fully-formed task prompt to send to the agent.
         workdir: Working directory for file operations, or ``None`` for cwd.
         enable_pev: Whether to enable the Plan-Execute-Verify loop.
+        active_skills: Skill names to load, or ``None`` to load all.
     """
     display = HCodeDisplay()
     display.show_task_header(task)
@@ -132,7 +148,11 @@ def _run_agent_task(task: str, workdir: str | None, *, enable_pev: bool = True) 
     async def _invoke() -> str:
         import datetime
 
-        agent = await create_hcode_agent(enable_pev=enable_pev, work_dir=workdir)
+        agent = await create_hcode_agent(
+            enable_pev=enable_pev,
+            work_dir=workdir,
+            active_skills=active_skills,
+        )
         thread_id = "run_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         result = await agent.ainvoke(
             {"messages": [HumanMessage(content=task)]},
@@ -180,12 +200,16 @@ def cli(ctx: click.Context) -> None:
 @click.option("--fast", is_flag=True, default=False, help="Skip planning — execute in one shot.")
 @click.option("--workdir", "-w", "-C", default=None,
               help="Working directory for file operations. Defaults to current directory.")
-def run(task: str, no_pev: bool, fast: bool, workdir: str | None) -> None:
+@click.option("--skills", default=None, metavar="SKILLS",
+              help="Comma-separated skills to activate (e.g. clean-code,tdd-lite). Default: all.")
+def run(task: str, no_pev: bool, fast: bool, workdir: str | None, skills: str | None) -> None:
     """Run a single TASK and print the result."""
     _validate_workdir(workdir)
-    # --fast (and --no-pev) disable the Plan-Execute-Verify loop -> one-shot.
-    # The task text is sent clean (no marker prefix).
-    _run_agent_task(task, workdir, enable_pev=_enable_pev(no_pev, fast))
+    # Parse --skills into a list; empty/missing → None (all skills).
+    active_skills: list[str] | None = (
+        [s.strip() for s in skills.split(",") if s.strip()] or None
+    ) if skills else None
+    _run_agent_task(task, workdir, enable_pev=_enable_pev(no_pev, fast), active_skills=active_skills)
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +289,99 @@ async def _select_approval_choice() -> str:
     return choice if choice in ("accept", "always", "reject") else "reject"
 
 
+async def _select_skills_interactive(
+    console,
+    all_skills: list[str],
+    current: list[str] | None,
+) -> list[str] | None:
+    """Inline ↑/↓ + Space multi-select skill picker.
+
+    Space toggles the highlighted skill on/off; ``a`` / ``A`` toggles all;
+    ``Enter`` confirms; ``Escape`` / ``Ctrl-C`` cancels (keeping *current*).
+    ``erase_when_done`` removes the menu rows on exit so nothing is orphaned.
+
+    Returns:
+        ``None`` if all skills are selected (sentinel for "all").
+        ``list[str]`` of the selected names if a subset is chosen.
+        The original *current* value if the user cancels.
+    """
+    if not all_skills:
+        console.print("[dim]No skills available.[/dim]")
+        return current
+
+    selected: set[str] = set(all_skills) if current is None else set(current)
+    cursor = 0
+
+    def _render() -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = [
+            ("dim", "Select skills  [Space toggle · ↑↓ move · a=all · Enter confirm · Esc cancel]\n"),
+        ]
+        for i, name in enumerate(all_skills):
+            check = "x" if name in selected else " "
+            line = f"{'>' if i == cursor else ' '} [{check}] {name}\n"
+            rows.append(("reverse" if i == cursor else "", line))
+        n, total = len(selected), len(all_skills)
+        rows.append(("dim", f"{n}/{total} selected"))
+        return rows
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event) -> None:  # noqa: ANN001
+        nonlocal cursor
+        cursor = (cursor - 1) % len(all_skills)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _down(event) -> None:  # noqa: ANN001
+        nonlocal cursor
+        cursor = (cursor + 1) % len(all_skills)
+        event.app.invalidate()
+
+    @kb.add(" ")
+    def _toggle(event) -> None:  # noqa: ANN001
+        name = all_skills[cursor]
+        selected.discard(name) if name in selected else selected.add(name)
+        event.app.invalidate()
+
+    @kb.add("a")
+    @kb.add("A")
+    def _toggle_all(event) -> None:  # noqa: ANN001
+        if len(selected) == len(all_skills):
+            selected.clear()
+        else:
+            selected.update(all_skills)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _confirm(event) -> None:  # noqa: ANN001
+        event.app.exit(result=True)
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event) -> None:  # noqa: ANN001
+        event.app.exit(result=False)
+
+    app: Application = Application(
+        layout=Layout(
+            Window(FormattedTextControl(_render, focusable=True, show_cursor=False))
+        ),
+        key_bindings=kb,
+        full_screen=False,
+        erase_when_done=True,
+    )
+    confirmed = await app.run_async()
+
+    if not confirmed:
+        return current  # cancelled — leave selection unchanged
+
+    # Empty selection → treat as all (footgun guard, mirrors #92).
+    # Full selection  → None (sentinel for "all skills").
+    if not selected or selected >= set(all_skills):
+        return None
+    return sorted(selected)
+
+
 async def _prompt_bash_approval(display: HCodeDisplay, command: str) -> str:
     """Ask the user to accept, always-accept, or reject a shell command (slice c).
 
@@ -328,11 +445,18 @@ def chat(session: str | None, workdir: str | None) -> None:
         # the gate. run/analyze/explore (ainvoke) and the daemon never set
         # interrupt_on at all, so they are unaffected regardless.
         approval_enabled = sys.stdin.isatty() and sys.stdout.isatty()
-        agent = await create_hcode_agent(
-            session_id=session_id,
-            work_dir=workdir,
-            interrupt_on=_approval_interrupt_on(approval_enabled),
-        )
+        # Active skills filter: None = all (default). Changed via /skills multi-select.
+        active_skills: list[str] | None = None
+
+        async def _build_agent():
+            return await create_hcode_agent(
+                session_id=session_id,
+                work_dir=workdir,
+                active_skills=active_skills,
+                interrupt_on=_approval_interrupt_on(approval_enabled),
+            )
+
+        agent = await _build_agent()
         # Input layer: completion (slash commands, file paths, phrases),
         # FileHistory + auto-suggest. Dispatch below is unchanged.
         prompt_session = build_chat_session(work_dir=workdir)
@@ -357,6 +481,22 @@ def chat(session: str | None, workdir: str | None) -> None:
                 continue
 
             if user_input.startswith("/"):
+                # Async intercept: /skills on a real TTY shows the interactive
+                # multi-select menu.  Non-TTY (tests, piped stdin) falls through
+                # to handle_chat_command which lists skills synchronously.
+                if user_input.split()[0].lower() == "/skills" and _is_interactive_tty():
+                    from hcode_v2.skills_path import default_skills_dirs, list_skill_names
+                    all_skills = list_skill_names(default_skills_dirs())
+                    new_skills = await _select_skills_interactive(
+                        display.console, all_skills, active_skills
+                    )
+                    if new_skills != active_skills:
+                        active_skills = new_skills
+                        agent = await _build_agent()
+                        label = "all" if active_skills is None else ", ".join(active_skills)
+                        display.console.print(f"[dim]Active skills: {label}[/dim]")
+                    continue
+
                 ctx = SimpleNamespace(
                     console=display.console,
                     mcp_config_path=".hcode/mcp_config.json",
@@ -482,7 +622,7 @@ _CHAT_HELP: dict[str, str] = {
     "/clear": "Clear the conversation (start a fresh session)",
     "/todos": "Toggle the live task checklist",
     "/config": "Show the resolved model configuration",
-    "/skills": "List available skills",
+    "/skills": "Select active skills (interactive multi-select on TTY; lists otherwise)",
     "/workflows": "List available workflows",
     "/exit": "End the session",
     "/quit": "End the session",
