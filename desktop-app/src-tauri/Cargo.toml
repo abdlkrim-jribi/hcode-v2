@@ -16,7 +16,11 @@ tauri-plugin-single-instance = "2"
 serde                       = { version = "1", features = ["derive"] }
 serde_json                  = "1"
 tokio                       = { version = "1", features = ["full"] }
-keyring                     = "3"
+# keyring v3 has NO default credential store: without a platform-backend feature
+# it silently uses a NON-PERSISTENT mock store, so set_password is a no-op and
+# get_password returns NoEntry — tokens never reach the real OS credential
+# manager. Enable the native backends per platform so save/read actually persist.
+keyring                     = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

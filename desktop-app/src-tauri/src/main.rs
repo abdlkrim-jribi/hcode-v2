@@ -268,3 +268,38 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error running HCode v2 Desktop");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Proves the FIX: with a native keyring backend enabled, a value SET under an
+    // account is READABLE back from a fresh Entry. Without a platform-backend
+    // feature, keyring v3 uses a non-persistent mock store and this returns
+    // NoEntry -- which is why read_mcp_secret always returned None and connect
+    // reported needs-auth. Uses a UNIQUE throwaway account (never "mcp:github")
+    // so a user's real saved token is untouched, and cleans up after itself.
+    #[test]
+    fn keyring_backend_persists_across_entries() {
+        let acct = "hcode-keyring-selftest:probe-9f3a";
+        let secret = "probe-value-do-not-use";
+        keyring::Entry::new("hcode-v2-desktop", acct).expect("entry")
+            .set_password(secret).expect("set_password");
+
+        let read = keyring::Entry::new("hcode-v2-desktop", acct).expect("entry").get_password();
+        let _ = keyring::Entry::new("hcode-v2-desktop", acct).expect("entry").delete_credential();
+
+        match read {
+            Ok(v)  => assert_eq!(v, secret, "round-tripped value differs"),
+            Err(e) => panic!("keyring round-trip failed ({e}) -- is a platform backend feature enabled?"),
+        }
+    }
+
+    #[test]
+    fn token_env_var_names_are_canonical() {
+        assert_eq!(mcp_token_env_var("github"), Some("GITHUB_PERSONAL_ACCESS_TOKEN"));
+        assert_eq!(mcp_token_env_var("gitlab"), Some("GITLAB_TOKEN"));
+        assert_eq!(mcp_token_env_var("filesystem"), None);
+    }
+
+}
