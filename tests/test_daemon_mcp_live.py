@@ -361,11 +361,14 @@ _FAKE_TOKEN = "ghp_FAKEsecret0000000000000000000000token"
 
 @pytest.fixture
 def clean_github_env():
-    """Ensure GITHUB_TOKEN is unset before/after (the daemon sets it directly)."""
+    """Ensure both github token vars are unset before/after (the daemon sets them
+    directly via os.environ, which pytest's monkeypatch wouldn't restore)."""
     import os
-    os.environ.pop("GITHUB_TOKEN", None)
+    for var in ("GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"):
+        os.environ.pop(var, None)
     yield
-    os.environ.pop("GITHUB_TOKEN", None)
+    for var in ("GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"):
+        os.environ.pop(var, None)
 
 
 def test_write_redacts_registered_secret(tmp_path, restore_stdout):
@@ -413,6 +416,28 @@ def test_connect_token_server_needs_auth_without_secret(tmp_path, monkeypatch, r
     _id, result, error = responses[-1]
     assert error is None
     assert result["status"] == "needs-auth"
+
+
+def test_github_gate_satisfied_by_either_token_name(tmp_path, monkeypatch, restore_stdout, clean_github_env):
+    """The needs-auth gate passes whether the token is under the canonical
+    GITHUB_PERSONAL_ACCESS_TOKEN or the legacy GITHUB_TOKEN (alias-aware)."""
+    import os
+    daemon = JsonRpcDaemon(mock=False, mcp_config=str(tmp_path / "mcp.json"))
+    gh_def = daemon._server_def("github")
+
+    # No token at all → needs-auth.
+    os.environ.pop("GITHUB_PERSONAL_ACCESS_TOKEN", None)
+    assert daemon._missing_required_env("github", gh_def) == ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+
+    # Canonical name present → satisfied.
+    os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] = "tok"
+    assert daemon._missing_required_env("github", gh_def) == []
+    os.environ.pop("GITHUB_PERSONAL_ACCESS_TOKEN")
+
+    # Legacy GITHUB_TOKEN present → satisfied via alias.
+    os.environ["GITHUB_TOKEN"] = "tok"
+    assert daemon._missing_required_env("github", gh_def) == []
+    os.environ.pop("GITHUB_TOKEN")
 
 
 def test_connect_token_server_connects_with_secret(tmp_path, monkeypatch, restore_stdout, clean_github_env):

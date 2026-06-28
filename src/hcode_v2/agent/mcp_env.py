@@ -86,11 +86,28 @@ def resolve_server_env(server_id: str, config_env: dict) -> dict:
         A new env dict: ``config_env`` plus any missing required vars found in
         ``os.environ``.
     """
-    required = (KNOWN_SERVERS.get(server_id) or {}).get("env_required", [])
+    # Use the HCode-corrected catalog (mcp_catalog) for env_required, NOT the
+    # vendored KNOWN_SERVERS: the vendored github entry named the wrong var
+    # (GITHUB_TOKEN), but the server actually reads GITHUB_PERSONAL_ACCESS_TOKEN.
+    from hcode_v2.agent.mcp_catalog import merged_catalog, token_aliases
+    required = (merged_catalog().get(server_id) or KNOWN_SERVERS.get(server_id) or {}).get("env_required", [])
     merged = dict(config_env)
     for var in required:
         if var not in merged and var in os.environ:
             merged[var] = os.environ[var]
+    # Token aliasing (scoped to THIS server): if the auth token is available under
+    # ANY accepted env-var name (canonical or legacy), inject it under ALL of them
+    # so the server reads whichever it expects. Only the named server's aliases are
+    # touched, so a github token never leaks into an unrelated server's env.
+    aliases = token_aliases(server_id)
+    if aliases:
+        value = next(
+            (merged.get(a) or os.environ.get(a) for a in aliases if merged.get(a) or os.environ.get(a)),
+            None,
+        )
+        if value:
+            for a in aliases:
+                merged.setdefault(a, value)
     return merged
 
 

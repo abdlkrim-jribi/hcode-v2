@@ -38,13 +38,21 @@ def test_no_longer_uses_nonexistent_npm_packages() -> None:
 
 def test_vendored_entries_pass_through_unchanged() -> None:
     # Servers we don't override keep their vendored definition (e.g. filesystem
-    # works as-is; github stays a token server).
+    # works as-is; gitlab stays a token+url server).
     from deepagents.mcp.client import KNOWN_SERVERS
 
     fs = known_server("filesystem")
     assert fs["command"] == KNOWN_SERVERS["filesystem"]["command"]
+    gl = known_server("gitlab")
+    assert gl["env_required"] == KNOWN_SERVERS["gitlab"]["env_required"]
+
+
+def test_github_override_uses_personal_access_token() -> None:
+    # The npm @modelcontextprotocol/server-github reads GITHUB_PERSONAL_ACCESS_TOKEN,
+    # not the vendored GITHUB_TOKEN — the override corrects env_required so the gate
+    # and the injected env match what the server actually reads.
     gh = known_server("github")
-    assert gh["env_required"] == ["GITHUB_TOKEN"]
+    assert gh["env_required"] == ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 
 
 def test_merged_catalog_is_superset_of_vendored() -> None:

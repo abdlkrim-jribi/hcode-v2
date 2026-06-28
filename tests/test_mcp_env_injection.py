@@ -74,6 +74,33 @@ def test_no_token_server_stays_empty(monkeypatch) -> None:
     assert resolve_server_env("filesystem", {}) == {}
 
 
+def test_github_token_reaches_server_under_personal_access_name(monkeypatch) -> None:
+    # The npm github server reads GITHUB_PERSONAL_ACCESS_TOKEN. A token supplied
+    # under the LEGACY GITHUB_TOKEN (e.g. .env) must be aliased to the canonical
+    # name so the server actually sees it.
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    result = resolve_server_env("github", {})
+    assert result["GITHUB_PERSONAL_ACCESS_TOKEN"] == "tok"  # aliased — the fix
+    assert result["GITHUB_TOKEN"] == "tok"
+
+
+def test_github_canonical_token_aliased_to_legacy(monkeypatch) -> None:
+    # The reverse: a keychain token under the canonical name is also exposed under
+    # the legacy name, so either server variant authenticates.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "tok")
+    result = resolve_server_env("github", {})
+    assert result["GITHUB_TOKEN"] == "tok"
+    assert result["GITHUB_PERSONAL_ACCESS_TOKEN"] == "tok"
+
+
+def test_github_token_does_not_leak_to_other_servers(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "secret-tok")
+    fs_env = resolve_server_env("filesystem", {})
+    assert not any("GITHUB" in k for k in fs_env)
+
+
 def test_factory_returns_client_with_injected_env(monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     config = MCPServerConfig(

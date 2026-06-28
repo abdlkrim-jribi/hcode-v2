@@ -121,11 +121,15 @@ async fn run_workflow(workflow: String, state: State<'_, AppState>) -> Result<()
 async fn list_mcp_servers(state: State<'_, AppState>) -> Result<(), String> {
     rpc(&state, "list_mcp_servers", serde_json::json!({}))
 }
-// Map an MCP server id to the env var its subprocess expects for auth. None for
-// no-auth servers. Phase 2: GitHub/GitLab use a Personal Access Token.
+// Map an MCP server id to the CANONICAL env var its subprocess reads for auth.
+// None for no-auth servers. The npm github/gitlab servers read the
+// *_PERSONAL_ACCESS_TOKEN names (NOT *_TOKEN); the daemon aliases the value to the
+// legacy names too, so injecting the canonical one is sufficient.
 fn mcp_token_env_var(server: &str) -> Option<&'static str> {
     match server {
-        "github" => Some("GITHUB_TOKEN"),
+        "github" => Some("GITHUB_PERSONAL_ACCESS_TOKEN"),
+        // gitlab keeps GITLAB_TOKEN (the vendored env_required name); the daemon
+        // aliases it to GITLAB_PERSONAL_ACCESS_TOKEN in the subprocess env too.
         "gitlab" => Some("GITLAB_TOKEN"),
         _ => None,
     }

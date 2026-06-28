@@ -262,12 +262,26 @@ class JsonRpcDaemon:
         """Required env vars NOT satisfied by os.environ or the config env block.
 
         A non-empty result means the server needs a token we don't have →
-        "needs-auth" (Phase 2). An empty result means we can connect in Phase 1.
+        "needs-auth" (Phase 2). An empty result means we can connect.
+
+        Alias-aware: a required token var is satisfied if it OR any of the
+        server's accepted alias names is present (so a keychain token under the
+        canonical GITHUB_PERSONAL_ACCESS_TOKEN and a legacy GITHUB_TOKEN in .env
+        both pass the gate).
         """
         import os
+        from hcode_v2.agent.mcp_catalog import token_aliases
         required = (self._catalog().get(name) or server_def or {}).get("env_required", [])
         env_block = (server_def or {}).get("env", {})
-        return [v for v in required if v not in os.environ and v not in env_block]
+        aliases = set(token_aliases(name))
+
+        def _present(var: str) -> bool:
+            # The var itself, or — if it's part of the server's token-alias set —
+            # any alias, satisfies the requirement.
+            candidates = aliases if var in aliases else {var}
+            return any(c in os.environ or c in env_block for c in candidates)
+
+        return [v for v in required if not _present(v)]
 
     async def _connect_live(self, name: str, server_def: dict) -> Any:
         """Spawn + connect a live MCP client for one server; cache it. Returns it."""
