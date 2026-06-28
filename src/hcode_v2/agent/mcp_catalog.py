@@ -41,7 +41,37 @@ CATALOG_OVERRIDES: dict[str, dict] = {
         "env_required": [],
         "description": "SQLite — query/manage a local SQLite DB (uvx mcp-server-sqlite)",
     },
+    # The npm @modelcontextprotocol/server-github (v2025.4.8) reads
+    # GITHUB_PERSONAL_ACCESS_TOKEN — NOT GITHUB_TOKEN, which the vendored catalog
+    # declared. With the wrong name the server starts and lists its 26 static
+    # tools but is UNAUTHENTICATED (it never sees the token), so real API calls
+    # fail. Correct env_required to the name the server actually reads.
+    "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {},
+        "env_required": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "description": "GitHub — issues, PRs, commits, repos (26 tools)",
+    },
+    # gitlab is left as the vendored entry (env_required GITLAB_TOKEN + GITLAB_URL —
+    # the URL is a required non-secret, so it must stay in env_required). Token
+    # aliasing below still injects the PAT name for whichever the server reads.
 }
+
+# Accepted env-var names a server's auth token may be supplied under, in priority
+# order (the FIRST is the canonical name the server reads). The token is injected
+# into the subprocess under ALL of them, and the needs-auth gate is satisfied if
+# ANY is present — so a keychain token (canonical name) AND a legacy GITHUB_TOKEN
+# in .env both work end-to-end.
+TOKEN_ALIASES: dict[str, list[str]] = {
+    "github": ["GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"],
+    "gitlab": ["GITLAB_PERSONAL_ACCESS_TOKEN", "GITLAB_TOKEN"],
+}
+
+
+def token_aliases(server_id: str) -> list[str]:
+    """Env-var names a server's auth token may be supplied under ([] if none)."""
+    return TOKEN_ALIASES.get(server_id, [])
 
 
 def merged_catalog() -> dict[str, dict]:
@@ -59,4 +89,6 @@ def known_server(name: str) -> dict | None:
     return merged_catalog().get(name)
 
 
-__all__ = ["CATALOG_OVERRIDES", "merged_catalog", "known_server"]
+__all__ = [
+    "CATALOG_OVERRIDES", "TOKEN_ALIASES", "merged_catalog", "known_server", "token_aliases",
+]
