@@ -36,6 +36,7 @@ interface AgentPanelProps {
     /** Skill selected from the Skills panel — shown as a chip in the composer. */
     activeSkill?: string | null;
     onDismissSkill?: () => void;
+    onAbort?: () => void;
 }
 
 export default function AgentPanel({
@@ -57,6 +58,7 @@ export default function AgentPanel({
     onCollapseClick,
     activeSkill,
     onDismissSkill,
+    onAbort,
 }: AgentPanelProps) {
     return (
         <div className="hcode-agentchat">
@@ -88,6 +90,7 @@ export default function AgentPanel({
                 activeSkill={activeSkill}
                 onDismissSkill={onDismissSkill}
                 onSubmit={onSubmitTask}
+                onAbort={onAbort}
             />
         </div>
     );

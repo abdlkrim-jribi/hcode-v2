@@ -15,9 +15,10 @@ interface Props {
     activeSkill?: string | null;
     onDismissSkill?: () => void;
     onSubmit: (task: string, mode: 'planning' | 'fast') => void;
+    onAbort?: () => void;
 }
 
-export default function Composer({ disabled, activeSkill, onDismissSkill, onSubmit }: Props) {
+export default function Composer({ disabled, activeSkill, onDismissSkill, onSubmit, onAbort }: Props) {
     const [taskInput, setTaskInput] = useState('');
     const [mode, setMode] = useState<'planning' | 'fast'>('planning');
 
@@ -63,6 +64,15 @@ export default function Composer({ disabled, activeSkill, onDismissSkill, onSubm
                 </div>
                 <div className="hcode-composer-send">
                     <span className="hcode-composer-hint">{disabled ? 'Agent is working…' : 'Ctrl+Enter to send'}</span>
+                    {disabled && onAbort && (
+                        <button
+                            className="hcode-btn hcode-btn--ghost hcode-btn--small"
+                            onClick={onAbort}
+                            title="Stop the current task"
+                        >
+                            Stop
+                        </button>
+                    )}
                     <button
                         className="hcode-btn hcode-btn--primary hcode-btn--small"
                         onClick={submit}
