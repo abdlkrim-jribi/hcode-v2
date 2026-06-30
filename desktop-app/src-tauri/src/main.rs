@@ -70,12 +70,16 @@ async fn run_task(
     task: String, mode: String, autonomous: bool,
     thread_id: Option<String>, work_dir: Option<String>,
     active_skills: Option<Vec<String>>,
+    model: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut params = serde_json::json!({ "task": task, "mode": mode, "autonomous": autonomous });
     if let Some(tid)    = thread_id    { params["thread_id"]    = serde_json::json!(tid); }
     if let Some(wd)     = work_dir     { params["work_dir"]     = serde_json::json!(wd); }
     if let Some(skills) = active_skills { params["active_skills"] = serde_json::json!(skills); }
+    // Model NAME only (never a key) — the daemon keeps the .env key/base_url and
+    // swaps only the model. Omitted → daemon uses the configured default.
+    if let Some(m)      = model        { params["model"]        = serde_json::json!(m); }
     rpc(&state, "run_task", params)
 }
 #[tauri::command]
@@ -112,6 +116,10 @@ async fn list_skills(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn list_workflows(state: State<'_, AppState>) -> Result<(), String> {
     rpc(&state, "list_workflows", serde_json::json!({}))
+}
+#[tauri::command]
+async fn list_models(state: State<'_, AppState>) -> Result<(), String> {
+    rpc(&state, "list_models", serde_json::json!({}))
 }
 #[tauri::command]
 async fn run_workflow(workflow: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -260,7 +268,7 @@ fn main() {
             start_daemon, stop_daemon, daemon_health,
             run_task, abort_task, approve_plan, reject_plan,
             accept_patch, reject_patch, rollback_all,
-            list_skills, list_workflows, run_workflow,
+            list_skills, list_workflows, list_models, run_workflow,
             list_mcp_servers, connect_mcp_server, disconnect_mcp_server,
             open_folder_dialog, list_directory, read_file, write_file,
             save_api_key, get_api_key, has_api_key,
