@@ -86,6 +86,65 @@ def test_run_task_evicts_agent_when_active_skills_change(monkeypatch, restore_st
     asyncio.run(_drive())
 
 
+def test_run_task_evicts_agent_when_model_changes(monkeypatch, restore_stdout):
+    """Switching the selected model mid-session forces a rebuild on the next task."""
+    builder = AsyncMock(return_value=_FakeAgent())
+    monkeypatch.setattr("hcode_v2.agent.factory.create_hcode_agent", builder)
+
+    daemon = JsonRpcDaemon(mock=False)
+
+    async def _drive() -> None:
+        # First call: no model override (None = .env default).
+        await daemon._run_task(1, "task", "tid", model=None)
+        assert builder.call_count == 1
+        assert builder.call_args.kwargs["model"] is None
+
+        # Same (default) model → reuse the cached agent.
+        await daemon._run_task(2, "task", "tid", model=None)
+        assert builder.call_count == 1
+
+        # Different model → evict + rebuild, and the new id reaches the factory.
+        await daemon._run_task(3, "task", "tid", model="qwen/qwen-2.5-coder")
+        assert builder.call_count == 2
+        assert builder.call_args.kwargs["model"] == "qwen/qwen-2.5-coder"
+
+        # Same model again → reuse.
+        await daemon._run_task(4, "task", "tid", model="qwen/qwen-2.5-coder")
+        assert builder.call_count == 2
+
+        # Back to default (None) → evict + rebuild.
+        await daemon._run_task(5, "task", "tid", model=None)
+        assert builder.call_count == 3
+
+    asyncio.run(_drive())
+
+
+def test_run_task_dispatch_validates_model_param(monkeypatch, restore_stdout):
+    """Non-string / blank model params degrade to None (the default) — no crash."""
+    captured: list = []
+
+    async def _capture(req_id, task, thread_id, work_dir=None, active_skills=None, model=None):
+        captured.append(model)
+
+    daemon = JsonRpcDaemon(mock=False)
+    monkeypatch.setattr(daemon, "_run_task", _capture)
+
+    async def _drive() -> None:
+        for params, expected in [
+            ({"task": "t"}, None),                       # absent → None
+            ({"task": "t", "model": ""}, None),          # blank → None
+            ({"task": "t", "model": "  "}, None),        # whitespace → None
+            ({"task": "t", "model": 123}, None),         # wrong type → None
+            ({"task": "t", "model": "free/m"}, "free/m"),# valid → passed through
+        ]:
+            await daemon._handle_run_task_dispatch(1, params)
+            if daemon._current_task:
+                await daemon._current_task
+        assert captured == [None, None, None, None, "free/m"]
+
+    asyncio.run(_drive())
+
+
 def test_run_task_evicts_agent_when_mcp_config_changes(tmp_path, monkeypatch, restore_stdout):
     """Connecting/disconnecting an MCP server changes the config signature →
     the cached agent evicts and rebuilds so the new tools actually reach it."""
