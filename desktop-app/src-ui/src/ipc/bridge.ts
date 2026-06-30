@@ -164,6 +164,14 @@ const _mockSavedKeys = new Set<string>();
 // Mock session list. "default" is included so the UI's filter (which hides the
 // CLI's single-shot default.db) is demoable keyless, like the real daemon returns.
 const MOCK_SESSIONS: string[] = ['default', 'gui_demo_1', 'gui_demo_2'];
+// Mock model list — realistic free + tool-capable OpenRouter ids so the dropdown
+// is populated keyless. Mirrors the {id, name, context_length} daemon shape.
+const MOCK_MODELS = [
+    { id: 'gpt-oss (default)',           name: 'gpt-oss (default)',                    context_length: 0 },
+    { id: 'qwen/qwen-2.5-coder-32b:free', name: 'Qwen 2.5 Coder 32B (free)',           context_length: 131072 },
+    { id: 'deepseek/deepseek-chat:free',  name: 'DeepSeek V3 (free)',                  context_length: 65536 },
+    { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Experimental (free)', context_length: 1048576 },
+];
 
 // Mock workspace shown when Open Folder is used in pure-mock (VITE_MOCK) mode,
 // so the file tree never hangs on "Loading files..." (mock used to return []).
@@ -299,6 +307,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         case 'list_skills':       return { skills: MOCK_SKILLS };
         case 'list_workflows':    return { workflows: MOCK_WORKFLOWS };
         case 'list_sessions':     return { sessions: MOCK_SESSIONS };
+        case 'list_models':       return { models: MOCK_MODELS };
         case 'list_mcp_servers':  return { servers: MOCK_MCP_SERVERS };
         case 'connect_mcp_server': {
             const server = String(args?.server ?? '');
@@ -320,7 +329,8 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
             // Simulate the daemon's single-flight guard for the keyless demo:
             // a task containing "busy" rejects exactly as a 2nd concurrent run_task would.
             if (/\bbusy\b/i.test(task)) throw new Error('A task is already running');
-            console.info('[Mock IPC] run_task thread_id =', args?.thread_id ?? '(none)');
+            console.info('[Mock IPC] run_task thread_id =', args?.thread_id ?? '(none)',
+                         'model =', args?.model ?? '(default)');
             _fireMock(task, (args?.mode as 'planning' | 'fast') || 'planning');
             return undefined;
         }
@@ -360,6 +370,7 @@ export async function runTask(
     task: string, mode: 'planning' | 'fast', autonomous: boolean,
     threadId?: string, workDir?: string,
     activeSkills?: string[] | null,
+    model?: string | null,
 ): Promise<void> {
     const params: Record<string, unknown> = { task, mode, autonomous };
     if (threadId) params.thread_id = threadId;
@@ -367,6 +378,9 @@ export async function runTask(
     // Only send active_skills when it's a non-null, non-empty subset.
     // Omitting it (or sending null) tells the daemon to load all skills.
     if (activeSkills && activeSkills.length > 0) params.active_skills = activeSkills;
+    // Send the model NAME only (never a key) when one is chosen; omitting it
+    // tells the daemon to use the .env default model (zero regression).
+    if (model) params.model = model;
     return (await getInvoke())('run_task', params) as Promise<void>;
 }
 export async function abortTask(): Promise<void> {
@@ -467,6 +481,16 @@ export async function listWorkflows() {
 export async function listSessions(): Promise<string[]> {
     const res = await queryRpc('list_sessions') as { sessions?: unknown[] };
     return (res?.sessions ?? []) as string[];
+}
+/** One model row from the daemon's list_models (free + tool-capable subset). */
+export interface ModelRow { id: string; name: string; context_length: number; }
+/** Live model catalog from the provider (filtered to free, tool-capable models).
+ *  Falls back to the .env-declared models if the provider is unreachable, so the
+ *  result is never empty. Carries model ids/names only — never an API key. */
+export async function listModels(): Promise<ModelRow[]> {
+    const res = await queryRpc('list_models') as { models?: unknown[] };
+    return ((res?.models ?? []) as Array<{ id: string; name?: string; context_length?: number }>)
+        .map(m => ({ id: m.id, name: m.name ?? m.id, context_length: m.context_length ?? 0 }));
 }
 export async function runWorkflow(workflow: string): Promise<void> {
     return (await getInvoke())('run_workflow', { workflow }) as Promise<void>;

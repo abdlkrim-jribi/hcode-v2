@@ -30,6 +30,7 @@ import SkillsPanel from './components/SkillsPanel';
 import WorkflowsPanel from './components/WorkflowsPanel';
 
 import * as ipc from './ipc/bridge';
+import type { ModelRow } from './ipc/bridge';
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
@@ -167,6 +168,18 @@ export default function App() {
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   // Multi-select: which skills the agent loads. null = all (default). Set = specific subset.
   const [activeSkills, setActiveSkills] = useState<Set<string> | null>(null);
+  // Live model catalog (free + tool-capable) from the daemon, for the header
+  // dropdown. Fetched once on mount; falls back to the .env model if the provider
+  // is unreachable, so it's never empty for long.
+  const [models, setModels] = useState<ModelRow[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  // Per-session model choice keyed by thread_id (model id; absent = .env default).
+  // Same localStorage convention as session names — the thread_id is unchanged, so
+  // daemon memory is unaffected; only which model the next task runs against.
+  const [sessionModels, setSessionModels] = useState<Record<string, string>>(() => {
+    try { const s = localStorage.getItem('hcode-session-models'); return s ? JSON.parse(s) : {}; }
+    catch { return {}; }
+  });
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
@@ -192,6 +205,19 @@ export default function App() {
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('hcode-theme', theme); }, [theme]);
   useEffect(() => { localStorage.setItem('hcode-editor-settings', JSON.stringify(editorSettings)); }, [editorSettings]);
   useEffect(() => { try { localStorage.setItem('hcode-session-names', JSON.stringify(sessionNames)); } catch { /* storage unavailable */ } }, [sessionNames]);
+  useEffect(() => { try { localStorage.setItem('hcode-session-models', JSON.stringify(sessionModels)); } catch { /* storage unavailable */ } }, [sessionModels]);
+  // Fetch the live model catalog once on mount. listModels never throws an empty
+  // result (the daemon falls back to the .env model), but guard anyway so a
+  // transport failure just leaves the dropdown on "default".
+  useEffect(() => {
+    let alive = true;
+    setModelsLoading(true);
+    ipc.listModels()
+      .then(m => { if (alive) setModels(m); })
+      .catch(() => { /* leave models empty → dropdown shows only the default */ })
+      .finally(() => { if (alive) setModelsLoading(false); });
+    return () => { alive = false; };
+  }, []);
   // Persist the active session id; auto-dismiss notices; fetch the session list on mount.
   useEffect(() => { try { localStorage.setItem(SESSION_KEY, state.currentSessionId); } catch { /* ignore */ } }, [state.currentSessionId]);
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 4500); return () => clearTimeout(t); }, [notice]);
@@ -216,6 +242,8 @@ export default function App() {
   const activeTurn = state.turns.length ? state.turns[state.turns.length - 1] : null;
   const phase: AgentPhase = activeTurn ? activeTurn.phase : 'idle';
   const isBusy = activeTurn ? BUSY_PHASES.includes(activeTurn.phase) : false;
+  // Model chosen for the active session (null = .env default). Persisted per session.
+  const selectedModel = sessionModels[state.currentSessionId] ?? null;
   const reviewTurn = state.reviewTurnId ? state.turns.find(t => t.id === state.reviewTurnId) ?? null : null;
   const pendingPatchCount = useMemo(() => state.turns.reduce((n, t) => n + t.patches.length, 0), [state.turns]);
   // Sessions for the dropdown: active first, then any session we have in-run turns
@@ -345,7 +373,9 @@ export default function App() {
       // (persist=True + per-session agent cache => the agent remembers prior turns).
       // activeSkills: null → omit param (daemon loads all). Set → send array.
       const skillsArg = activeSkills && activeSkills.size > 0 ? [...activeSkills] : null;
-      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined, skillsArg);
+      // model: the session's chosen model id, or null = the daemon's .env default.
+      const modelArg = sessionModels[state.currentSessionId] || null;
+      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined, skillsArg, modelArg);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       if (/already running/i.test(m)) {
@@ -363,7 +393,19 @@ export default function App() {
     // over the stale (previous) workDir and keep sending it — the daemon then
     // sees the same work_dir for the thread_id and never evicts/rebuilds the
     // cached agent, so the agent keeps working in the old folder.
-  }, [state.currentSessionId, state.workDir, activeSkills]);
+  }, [state.currentSessionId, state.workDir, activeSkills, sessionModels]);
+
+  // Pick a model for the active session (or null = revert to the .env default).
+  // Stored per thread_id; the choice is sent on the next run_task and the daemon
+  // evicts/rebuilds the cached agent so that task uses the new model.
+  const handleSelectModel = useCallback((id: string | null) => {
+    setSessionModels(prev => {
+      const next = { ...prev };
+      if (id) next[state.currentSessionId] = id;
+      else delete next[state.currentSessionId];
+      return next;
+    });
+  }, [state.currentSessionId]);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
@@ -615,6 +657,10 @@ export default function App() {
                 activeSkill={activeSkill}
                 onDismissSkill={() => setActiveSkill(null)}
                 onAbort={handleAbort}
+                models={models}
+                modelsLoading={modelsLoading}
+                selectedModel={selectedModel}
+                onSelectModel={handleSelectModel}
               />
             )}
           </div>
