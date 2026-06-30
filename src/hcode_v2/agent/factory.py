@@ -27,7 +27,7 @@ from hcode_v2.utils.config import Config
 logger = logging.getLogger(__name__)
 
 
-def _build_model():
+def _build_model(model_override: str | None = None):
     """Build the LangChain chat model from environment config.
 
     Model identity, endpoint, and tool-calling strategy come from
@@ -37,6 +37,11 @@ def _build_model():
     - api_key:    ``HCODE_MODEL_API_KEY`` -> ``OPENAI_API_KEY``
     - base_url:   ``HCODE_MODEL_BASE_URL`` -> ``OPENAI_BASE_URL``
     - mode:       ``HCODE_TOOLCALL_MODE``  -> ``"native"`` (default)
+
+    ``model_override`` (GUI model selection) replaces ONLY the model name — the
+    api_key, base_url, and tool-calling mode stay from the environment (same
+    provider account/endpoint, different model). ``None`` (the default and the
+    CLI path) preserves the exact prior behaviour: the configured model name.
 
     ``ANTHROPIC_API_KEY`` selects ``ChatAnthropic`` when set and no
     OpenAI-compatible key is resolved.  ``HCODE_MAX_TOKENS`` caps output
@@ -50,20 +55,21 @@ def _build_model():
     ``scripts/probe_model.py`` against the endpoint to determine the right mode.
     """
     config = Config.from_env()
+    model_name = model_override or config.model
     max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "8000"))
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
     if anthropic_key and not config.api_key:
         from langchain_anthropic import ChatAnthropic
         base_model = ChatAnthropic(
-            model=config.model,
+            model=model_name,
             max_tokens=max_tokens,
             api_key=anthropic_key,
         )
     else:
         from langchain_openai import ChatOpenAI
         base_model = ChatOpenAI(
-            model=config.model,
+            model=model_name,
             max_tokens=max_tokens,
             api_key=config.api_key,
             base_url=config.base_url,
@@ -110,8 +116,14 @@ async def create_hcode_agent(
     work_dir: str | None = None,
     interrupt_on: dict | None = None,
     active_skills: list[str] | None = None,
+    model: str | None = None,
 ):
-    """Assemble the full HCode v2 agent from environment config."""
+    """Assemble the full HCode v2 agent from environment config.
+
+    ``model`` (GUI model selection) overrides only the model NAME for this agent;
+    ``None`` (the default and the CLI path) uses the configured model — zero
+    behaviour change when the argument is absent.
+    """
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -123,7 +135,7 @@ async def create_hcode_agent(
     else:
         checkpointer = MemorySaver()
 
-    model = _build_model()
+    chat_model = _build_model(model_override=model)
 
     # Create backend ONCE — shared by SummarizationMiddleware and agent.
     # virtual_mode=False: the deepagents builtins use REAL OS paths anchored at
@@ -215,7 +227,7 @@ async def create_hcode_agent(
     all_tools = get_all_tools() + mcp_tools
 
     return create_deep_agent(
-        model=model,
+        model=chat_model,
         tools=all_tools,
         middleware=middleware,
         backend=backend,

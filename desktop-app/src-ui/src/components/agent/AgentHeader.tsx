@@ -7,10 +7,12 @@
  * App threads into every run_task, so the agent keeps that session's memory.
  * Disabled while a task is in flight (switching mid-task would mis-route events).
  *
- * The MODEL dropdown stays a disabled placeholder — Phase 3 (needs a daemon
- * model API + factory override).
+ * The MODEL dropdown is LIVE (Phase 3): it lists the provider's free, tool-capable
+ * models (fetched by App via list_models) and sets the model the next run uses.
+ * The empty value = the .env default model. Disabled while a task is in flight.
  */
 import React, { useState, useRef, useEffect } from 'react';
+import type { ModelRow } from '../../ipc/bridge';
 
 interface Props {
     sessions: string[];
@@ -23,6 +25,14 @@ interface Props {
     onRenameSession: (id: string, name: string) => void;
     onSettingsClick: () => void;
     onCollapseClick: () => void;
+    /** Live model catalog (free + tool-capable). Empty while loading/failed. */
+    models: ModelRow[];
+    /** True while the model list is being fetched. */
+    modelsLoading: boolean;
+    /** Selected model id, or null = the .env default model. */
+    selectedModel: string | null;
+    /** Pick a model id, or null to revert to the default. */
+    onSelectModel: (id: string | null) => void;
 }
 
 /** Compact display label for a session id. */
@@ -40,6 +50,10 @@ export default function AgentHeader({
     onRenameSession,
     onSettingsClick,
     onCollapseClick,
+    models,
+    modelsLoading,
+    selectedModel,
+    onSelectModel,
 }: Props) {
     // Inline rename of the active session. The thread_id is unchanged — only the
     // label — so daemon memory is unaffected.
@@ -115,15 +129,27 @@ export default function AgentHeader({
                     </select>
                 )}
 
-                {/* Model selector — wired in Phase 3 (needs daemon model API + factory override). */}
+                {/* Model selector — LIVE (Phase 3): the provider's free, tool-capable
+                    models. Empty value = the .env default model. The chosen id is
+                    sent on the next run_task; switching evicts the cached agent so
+                    the next task uses the new model. Disabled while a task runs. */}
                 <select
                     className="hcode-chatselect"
-                    disabled
-                    value="default"
-                    onChange={() => { /* Phase 3 */ }}
-                    title="Model switching — wired in Phase 3 (needs daemon support)"
+                    value={selectedModel ?? ''}
+                    disabled={sessionsDisabled || modelsLoading}
+                    onChange={e => onSelectModel(e.target.value || null)}
+                    title={
+                        modelsLoading ? 'Loading available models…'
+                        : sessionsDisabled ? 'Finish the current task to switch models'
+                        : 'Choose the model for the next task (free, tool-capable)'
+                    }
                 >
-                    <option value="default">Model: gpt-oss (default)</option>
+                    <option value="">
+                        {modelsLoading ? 'Model: loading…' : 'Model: default (.env)'}
+                    </option>
+                    {models.map(m => (
+                        <option key={m.id} value={m.id}>Model: {m.name}</option>
+                    ))}
                 </select>
             </div>
         </div>

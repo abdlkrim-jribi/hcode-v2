@@ -35,7 +35,9 @@ def _capture_middleware(monkeypatch, tmp_path: Path, **factory_kwargs) -> list:
         return object()
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create_deep_agent)
-    monkeypatch.setattr(factory, "_build_model", lambda: object())
+    # Accept any args (the model_override kwarg from GUI model selection) so this
+    # stub stays valid as _build_model's signature grows additively.
+    monkeypatch.setattr(factory, "_build_model", lambda *a, **k: object())
     monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
 
     (tmp_path / "workflows").mkdir(exist_ok=True)

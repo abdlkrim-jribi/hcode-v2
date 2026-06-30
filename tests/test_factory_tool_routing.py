@@ -52,7 +52,9 @@ def _capture_create_deep_agent_kwargs(monkeypatch, tmp_path: Path) -> dict:
         return object()  # sentinel — only the kwargs matter here
 
     monkeypatch.setattr(factory, "create_deep_agent", fake_create_deep_agent)
-    monkeypatch.setattr(factory, "_build_model", lambda: object())
+    # Accept any args (the model_override kwarg from GUI model selection) so this
+    # recorder stays valid as _build_model's signature grows additively.
+    monkeypatch.setattr(factory, "_build_model", lambda *a, **k: object())
     # create_hcode_agent assigns os.environ["HCODE_ROOT_DIR"] directly; pre-seed
     # via monkeypatch so it's restored at teardown and doesn't leak to other tests.
     monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))

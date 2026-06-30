@@ -112,6 +112,12 @@ class JsonRpcDaemon:
         self._mcp_errors: dict[str, str] = {}    # server_id -> last connect error
         self._mcp_client_factory = mcp_client_factory
 
+        # list_models cache: the provider catalog changes slowly, so a live fetch
+        # is cached for a few minutes. (monotonic_ts, models) or None until first
+        # fetch. Cleared implicitly by TTL expiry in _handle_list_models.
+        self._models_cache: Optional[tuple[float, list[dict]]] = None
+        self._models_cache_ttl = 300.0  # seconds
+
         # SECURITY: MCP auth tokens (Phase 2) are registered here so they are
         # scrubbed from EVERYTHING the daemon emits — stdout (JSON-RPC responses +
         # daemon-message events) via _write, and stderr (logs) via the filter
@@ -174,6 +180,7 @@ class JsonRpcDaemon:
             elif method == "list_skills":          await self._handle_list_skills(req_id)
             elif method == "list_workflows":       await self._handle_list_workflows(req_id)
             elif method == "list_sessions":        await self._handle_list_sessions(req_id)
+            elif method == "list_models":          await self._handle_list_models(req_id)
             elif method == "list_mcp_servers":     await self._handle_list_mcp_servers(req_id)
             elif method == "connect_mcp_server":   await self._handle_connect_mcp_server(req_id, params)
             elif method == "disconnect_mcp_server": await self._handle_disconnect_mcp_server(req_id, params)
@@ -208,6 +215,59 @@ class JsonRpcDaemon:
         root = Path(".hcode/sessions")
         sessions = (sorted(p.stem for p in root.glob("*.db")) if root.is_dir() else [])
         self.send_response(req_id, {"sessions": sessions})
+
+    # ── Model discovery (live provider catalog → free + tool-capable subset) ───
+    #
+    # Fetches the provider's /models endpoint and filters to the models the agent
+    # can actually drive (free, tool-capable, >=32k context). The result is the
+    # source for the GUI model dropdown. SECURITY: the API key is sent ONLY in the
+    # request header inside provider.models.fetch_models — the rows returned here
+    # carry model ids/names + context length, never the key, so it cannot reach
+    # this response, the daemon-message stream, or logs.
+
+    async def _handle_list_models(self, req_id: Any) -> None:
+        models = await self._get_models()
+        self.send_response(req_id, {"models": models})
+
+    async def _get_models(self) -> list[dict]:
+        """Return the usable-model list, cached for a few minutes.
+
+        On any fetch failure (offline, non-OpenRouter provider, bad endpoint),
+        falls back to the .env-declared models so the dropdown is never empty.
+        Never raises — model discovery must not take the daemon down.
+        """
+        import time
+
+        from hcode_v2.provider.models import (
+            fallback_models, fetch_models, filter_usable_models,
+        )
+        from hcode_v2.utils.config import Config
+
+        now = time.monotonic()
+        if self._models_cache is not None:
+            ts, cached = self._models_cache
+            if now - ts < self._models_cache_ttl:
+                return cached
+
+        config = Config.from_env()
+        # No base_url means we can't introspect a catalog (e.g. bare OpenAI default
+        # or Anthropic) — go straight to the configured fallback.
+        if config.base_url:
+            try:
+                catalog = await fetch_models(config.base_url, config.api_key)
+                models = filter_usable_models(catalog)
+                if models:
+                    self._models_cache = (now, models)
+                    return models
+                logger.info("list_models: provider returned no usable models; using fallback")
+            except Exception as exc:  # noqa: BLE001 - any failure → graceful fallback
+                logger.warning("list_models fetch failed (%s); using fallback", exc)
+
+        models = fallback_models()
+        # Cache the fallback too, but briefly, so a transient outage doesn't hammer
+        # the provider on every dropdown mount while still recovering reasonably soon.
+        self._models_cache = (now, models)
+        return models
 
     # ── MCP: live connection management (Phase 1, no-auth servers) ─────────────
     #
@@ -486,8 +546,12 @@ class JsonRpcDaemon:
             [s for s in raw_skills if isinstance(s, str)] or None
             if isinstance(raw_skills, list) else None
         )
+        # model: the model id to run this task against, or None = .env default.
+        # Validate: must be a non-empty string; anything else → None (default).
+        raw_model = params.get("model")
+        model: Optional[str] = raw_model if isinstance(raw_model, str) and raw_model.strip() else None
         self._current_task = asyncio.create_task(
-            self._run_task(req_id, task, thread_id, work_dir, active_skills)
+            self._run_task(req_id, task, thread_id, work_dir, active_skills, model)
         )
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
@@ -497,7 +561,7 @@ class JsonRpcDaemon:
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
-    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None) -> None:
+    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
         try:
@@ -518,12 +582,14 @@ class JsonRpcDaemon:
                 # the same thread_id. persist=True routes state through the SQLite
                 # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
                 # across tasks and are resumable — matching the CLI.
-                # Evict the cached agent when work_dir, active_skills, OR the MCP
-                # config changes — all three are baked into the agent at build time
-                # (backend root_dir, the skills middleware allowlist, and the set of
-                # MCP servers whose tools the factory wires in, respectively). The
-                # MCP key makes a connect/disconnect actually reach the running agent
-                # on the next task instead of silently no-op'ing on a cached agent.
+                # Evict the cached agent when work_dir, active_skills, the MCP
+                # config, OR the model changes — all are baked into the agent at
+                # build time (backend root_dir, the skills middleware allowlist,
+                # the set of MCP servers whose tools the factory wires in, and the
+                # chat model, respectively). The MCP key makes a connect/disconnect
+                # actually reach the running agent on the next task; the model key
+                # makes a model switch rebuild on the next task instead of running
+                # on the stale one.
                 skills_key = frozenset(active_skills) if active_skills else None
                 mcp_key = self._mcp_config_signature()
                 cached = self._agents.get(thread_id)
@@ -531,6 +597,7 @@ class JsonRpcDaemon:
                     cached["work_dir"] != work_dir
                     or cached["skills_key"] != skills_key
                     or cached["mcp_key"] != mcp_key
+                    or cached["model"] != model
                 ):
                     cached = None
                     del self._agents[thread_id]
@@ -543,10 +610,12 @@ class JsonRpcDaemon:
                         persist=True,
                         work_dir=work_dir,
                         active_skills=list(skills_key) if skills_key else None,
+                        model=model,
                     )
                     self._agents[thread_id] = {
                         "agent": agent, "work_dir": work_dir,
                         "skills_key": skills_key, "mcp_key": mcp_key,
+                        "model": model,
                     }
                 else:
                     agent = cached["agent"]

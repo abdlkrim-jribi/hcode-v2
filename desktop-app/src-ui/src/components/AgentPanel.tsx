@@ -8,6 +8,7 @@
  */
 import React from 'react';
 import type { Turn } from '../types';
+import type { ModelRow } from '../ipc/bridge';
 import AgentHeader from './agent/AgentHeader';
 import ConversationView from './agent/ConversationView';
 import Composer from './agent/Composer';
@@ -37,6 +38,11 @@ interface AgentPanelProps {
     activeSkill?: string | null;
     onDismissSkill?: () => void;
     onAbort?: () => void;
+    /** Live model catalog (free + tool-capable) for the header dropdown. */
+    models: ModelRow[];
+    modelsLoading: boolean;
+    selectedModel: string | null;
+    onSelectModel: (id: string | null) => void;
 }
 
 export default function AgentPanel({
@@ -59,6 +65,10 @@ export default function AgentPanel({
     activeSkill,
     onDismissSkill,
     onAbort,
+    models,
+    modelsLoading,
+    selectedModel,
+    onSelectModel,
 }: AgentPanelProps) {
     return (
         <div className="hcode-agentchat">
@@ -72,6 +82,10 @@ export default function AgentPanel({
                 onRenameSession={onRenameSession}
                 onSettingsClick={onSettingsClick}
                 onCollapseClick={onCollapseClick}
+                models={models}
+                modelsLoading={modelsLoading}
+                selectedModel={selectedModel}
+                onSelectModel={onSelectModel}
             />
             {notice && (
                 <div className="hcode-agent-notice">
