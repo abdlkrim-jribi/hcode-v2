@@ -135,6 +135,17 @@ export function applyAgentMessage(turn: Turn, msg: HcodeMessage): Turn {
         case 'circuit_break':
             return { ...turn, error: msg.payload.reason, phase: 'error' };
 
+        // ── Abort ──────────────────────────────────────────────────────────────
+        // Idempotent: if ABORT_ACTIVE already set phase to 'done', this is a
+        // no-op. If the daemon event arrives first (e.g. race on WS path), it
+        // still lands cleanly — the partial answer is kept if one exists.
+        case 'aborted':
+            return {
+                ...turn,
+                phase: 'done',
+                answer: turn.answer || (msg.payload?.message ?? '_(aborted)_'),
+            };
+
         // ── Completion ─────────────────────────────────────────────────────
         case 'done':
             return {

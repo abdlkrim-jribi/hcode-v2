@@ -614,6 +614,7 @@ export default function App() {
                 onCollapseClick={() => setAgentCollapsed(true)}
                 activeSkill={activeSkill}
                 onDismissSkill={() => setActiveSkill(null)}
+                onAbort={handleAbort}
               />
             )}
           </div>

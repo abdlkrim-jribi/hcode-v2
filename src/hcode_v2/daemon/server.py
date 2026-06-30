@@ -177,6 +177,7 @@ class JsonRpcDaemon:
             elif method == "list_mcp_servers":     await self._handle_list_mcp_servers(req_id)
             elif method == "connect_mcp_server":   await self._handle_connect_mcp_server(req_id, params)
             elif method == "disconnect_mcp_server": await self._handle_disconnect_mcp_server(req_id, params)
+            elif method == "abort":                await self._handle_abort(req_id)
             elif method == "shutdown":             await self._handle_shutdown(req_id)
             else:
                 self.send_response(req_id, error={"code": -32601, "message": f"Method not found: {method}"})
@@ -448,6 +449,13 @@ class JsonRpcDaemon:
         """
         return frozenset(self._configured_servers().keys())
 
+    async def _handle_abort(self, req_id: Any) -> None:
+        if self._current_task is not None and not self._current_task.done():
+            self._current_task.cancel()
+            self.send_response(req_id, {"status": "aborting"})
+        else:
+            self.send_response(req_id, {"status": "no_task_running"})
+
     async def _handle_shutdown(self, req_id: Any) -> None:
         self._running = False
         # Best-effort teardown of any live MCP subprocesses on shutdown.
@@ -492,82 +500,88 @@ class JsonRpcDaemon:
     async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
-
-        if self._mock:
-            await self._mock_streaming_task(task)
-            return
-
-        from langchain_core.messages import HumanMessage
-
-        from hcode_v2.agent.factory import create_hcode_agent
-        from hcode_v2.daemon.bridge import StreamingBridge
-
-        bridge = StreamingBridge(emit_fn=self.emit_event, pev_mode=True)
-        bridge.on_task_start()
-
         try:
-            # Build the agent once per session and reuse it for later tasks on
-            # the same thread_id. persist=True routes state through the SQLite
-            # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
-            # across tasks and are resumable — matching the CLI.
-            # Evict the cached agent when work_dir, active_skills, OR the MCP
-            # config changes — all three are baked into the agent at build time
-            # (backend root_dir, the skills middleware allowlist, and the set of
-            # MCP servers whose tools the factory wires in, respectively). The
-            # MCP key makes a connect/disconnect actually reach the running agent
-            # on the next task instead of silently no-op'ing on a cached agent.
-            skills_key = frozenset(active_skills) if active_skills else None
-            mcp_key = self._mcp_config_signature()
-            cached = self._agents.get(thread_id)
-            if cached is not None and (
-                cached["work_dir"] != work_dir
-                or cached["skills_key"] != skills_key
-                or cached["mcp_key"] != mcp_key
-            ):
-                cached = None
-                del self._agents[thread_id]
-            if cached is None:
-                agent = await create_hcode_agent(
-                    skills_dir=self._skills_dir,
-                    workflows_dir=self._workflows_dir,
-                    mcp_config=self._mcp_config,
-                    session_id=thread_id,
-                    persist=True,
-                    work_dir=work_dir,
-                    active_skills=list(skills_key) if skills_key else None,
-                )
-                self._agents[thread_id] = {
-                    "agent": agent, "work_dir": work_dir,
-                    "skills_key": skills_key, "mcp_key": mcp_key,
-                }
-            else:
-                agent = cached["agent"]
-            last_text = ""
-            async for event in agent.astream_events(
-                {"messages": [HumanMessage(content=task)]},
-                # recursion_limit MUST be explicit on the astream_events path:
-                # langchain_core stamps its default (25) into the config, which
-                # overrides the agent's bound 9999 and kills tasks after ~5 tool
-                # rounds. Mirrors the CLI fix (cli/main.py:242). Matters more now
-                # that PEV's execute phase runs up to 15 rounds.
-                config={
-                    "configurable": {"thread_id": thread_id},
-                    "recursion_limit": 1000,
-                },
-                version="v2",
-            ):
-                bridge.process_event(event)
-                # Track last AI message content for the done summary
-                if event.get("event") == "on_chat_model_end":
-                    msg = event.get("data", {}).get("output", {})
-                    if hasattr(msg, "content"):
-                        last_text = msg.content if isinstance(msg.content, str) else ""
+            if self._mock:
+                await self._mock_streaming_task(task)
+                return
 
-            bridge.finalize(summary=last_text)
+            from langchain_core.messages import HumanMessage
 
-        except Exception as exc:
-            logger.error("run_task streaming failed: %s", exc)
-            self.emit_event("error", {"message": str(exc), "recoverable": False})
+            from hcode_v2.agent.factory import create_hcode_agent
+            from hcode_v2.daemon.bridge import StreamingBridge
+
+            bridge = StreamingBridge(emit_fn=self.emit_event, pev_mode=True)
+            bridge.on_task_start()
+
+            try:
+                # Build the agent once per session and reuse it for later tasks on
+                # the same thread_id. persist=True routes state through the SQLite
+                # checkpointer (.hcode/sessions/<thread_id>.db) so sessions survive
+                # across tasks and are resumable — matching the CLI.
+                # Evict the cached agent when work_dir, active_skills, OR the MCP
+                # config changes — all three are baked into the agent at build time
+                # (backend root_dir, the skills middleware allowlist, and the set of
+                # MCP servers whose tools the factory wires in, respectively). The
+                # MCP key makes a connect/disconnect actually reach the running agent
+                # on the next task instead of silently no-op'ing on a cached agent.
+                skills_key = frozenset(active_skills) if active_skills else None
+                mcp_key = self._mcp_config_signature()
+                cached = self._agents.get(thread_id)
+                if cached is not None and (
+                    cached["work_dir"] != work_dir
+                    or cached["skills_key"] != skills_key
+                    or cached["mcp_key"] != mcp_key
+                ):
+                    cached = None
+                    del self._agents[thread_id]
+                if cached is None:
+                    agent = await create_hcode_agent(
+                        skills_dir=self._skills_dir,
+                        workflows_dir=self._workflows_dir,
+                        mcp_config=self._mcp_config,
+                        session_id=thread_id,
+                        persist=True,
+                        work_dir=work_dir,
+                        active_skills=list(skills_key) if skills_key else None,
+                    )
+                    self._agents[thread_id] = {
+                        "agent": agent, "work_dir": work_dir,
+                        "skills_key": skills_key, "mcp_key": mcp_key,
+                    }
+                else:
+                    agent = cached["agent"]
+                last_text = ""
+                async for event in agent.astream_events(
+                    {"messages": [HumanMessage(content=task)]},
+                    # recursion_limit MUST be explicit on the astream_events path:
+                    # langchain_core stamps its default (25) into the config, which
+                    # overrides the agent's bound 9999 and kills tasks after ~5 tool
+                    # rounds. Mirrors the CLI fix (cli/main.py:242). Matters more now
+                    # that PEV's execute phase runs up to 15 rounds.
+                    config={
+                        "configurable": {"thread_id": thread_id},
+                        "recursion_limit": 1000,
+                    },
+                    version="v2",
+                ):
+                    bridge.process_event(event)
+                    # Track last AI message content for the done summary
+                    if event.get("event") == "on_chat_model_end":
+                        msg = event.get("data", {}).get("output", {})
+                        if hasattr(msg, "content"):
+                            last_text = msg.content if isinstance(msg.content, str) else ""
+
+                bridge.finalize(summary=last_text)
+
+            except Exception as exc:
+                logger.error("run_task streaming failed: %s", exc)
+                self.emit_event("error", {"message": str(exc), "recoverable": False})
+
+        except asyncio.CancelledError:
+            self.emit_event("aborted", {"message": "Task aborted — last completed step preserved."})
+            raise
+        finally:
+            self._current_task = None
 
     async def _mock_streaming_task(self, task: str) -> None:
         """Mock run_task that emits the FULL keyless-demo story without a live model.
