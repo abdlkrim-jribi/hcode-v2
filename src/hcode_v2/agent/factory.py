@@ -7,6 +7,7 @@ import os
 import platform
 from datetime import date
 from pathlib import Path
+from typing import Callable
 
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
@@ -27,7 +28,39 @@ from hcode_v2.utils.config import Config
 logger = logging.getLogger(__name__)
 
 
-def _build_model(model_override: str | None = None):
+def _build_one_model(model_name: str, config: Config, max_tokens: int,
+                     anthropic_key: str | None, inner_retries: int | None):
+    """Build a single chat model client for ``model_name``.
+
+    ``inner_retries`` controls the provider SDK's own retry count: ``None`` leaves
+    the client default (the pre-existing single-model behaviour — ChatOpenAI
+    defaults to 2), and ``0`` disables SDK retries so the ResilientChatModel is the
+    single source of retry/backoff truth on the fallback path. The model is then
+    wrapped with ``JsonToolCallWrapper`` per ``HCODE_TOOLCALL_MODE``.
+    """
+    if anthropic_key and not config.api_key:
+        from langchain_anthropic import ChatAnthropic
+        kw = {} if inner_retries is None else {"max_retries": inner_retries}
+        base_model = ChatAnthropic(
+            model=model_name, max_tokens=max_tokens, api_key=anthropic_key, **kw,
+        )
+    else:
+        from langchain_openai import ChatOpenAI
+        kw = {} if inner_retries is None else {"max_retries": inner_retries}
+        base_model = ChatOpenAI(
+            model=model_name, max_tokens=max_tokens,
+            api_key=config.api_key, base_url=config.base_url, **kw,
+        )
+    return maybe_wrap(base_model, config.toolcall_mode)
+
+
+def _build_model(
+    model_override: str | None = None,
+    fallback_models: list[str] | None = None,
+    max_retries: int | None = None,
+    backoff_base: float | None = None,
+    on_fallback: "Callable[[str, str], None] | None" = None,
+):
     """Build the LangChain chat model from environment config.
 
     Model identity, endpoint, and tool-calling strategy come from
@@ -43,6 +76,15 @@ def _build_model(model_override: str | None = None):
     provider account/endpoint, different model). ``None`` (the default and the
     CLI path) preserves the exact prior behaviour: the configured model name.
 
+    ``fallback_models`` (429 resilience) is the ordered list of OTHER model names
+    to fall back to when the primary is rate-limited. When it is falsy (the
+    DEFAULT), this returns exactly the prior single client — zero behaviour
+    change, no retry wrapper, no added latency. When it is non-empty, the primary
+    + fallbacks are wrapped in a ``ResilientChatModel`` that retries transient
+    errors with backoff then advances to the next model (see provider/resilient).
+    ``on_fallback(from_name, to_name)`` is called when a switch happens so the UI
+    can surface it.
+
     ``ANTHROPIC_API_KEY`` selects ``ChatAnthropic`` when set and no
     OpenAI-compatible key is resolved.  ``HCODE_MAX_TOKENS`` caps output
     tokens (default 8000 — reasoning models like gpt-oss spend this budget
@@ -55,27 +97,29 @@ def _build_model(model_override: str | None = None):
     ``scripts/probe_model.py`` against the endpoint to determine the right mode.
     """
     config = Config.from_env()
-    model_name = model_override or config.model
+    primary = model_override or config.model
     max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "8000"))
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
-    if anthropic_key and not config.api_key:
-        from langchain_anthropic import ChatAnthropic
-        base_model = ChatAnthropic(
-            model=model_name,
-            max_tokens=max_tokens,
-            api_key=anthropic_key,
-        )
-    else:
-        from langchain_openai import ChatOpenAI
-        base_model = ChatOpenAI(
-            model=model_name,
-            max_tokens=max_tokens,
-            api_key=config.api_key,
-            base_url=config.base_url,
-        )
+    # DEFAULT path (fallback off): identical to the prior behaviour — one client,
+    # the SDK's own retry default, no resilience wrapper, no extra latency.
+    if not fallback_models:
+        return _build_one_model(primary, config, max_tokens, anthropic_key, inner_retries=None)
 
-    return maybe_wrap(base_model, config.toolcall_mode)
+    # Resilience path: primary first, then the distinct fallbacks. Each inner
+    # client's SDK retries are disabled (inner_retries=0) so ResilientChatModel
+    # owns retry/backoff; it then handles fall-through to the next model.
+    from hcode_v2.provider.resilient import ResilientChatModel, default_retry_config
+    names = [primary] + [m for m in fallback_models if m and m != primary]
+    clients = [
+        _build_one_model(n, config, max_tokens, anthropic_key, inner_retries=0)
+        for n in names
+    ]
+    mr, bb = default_retry_config(max_retries, backoff_base)
+    return ResilientChatModel(
+        clients=clients, model_names=names,
+        max_retries=mr, backoff_base=bb, on_fallback=on_fallback,
+    )
 
 
 def _build_env_block(work_dir: str) -> str:
@@ -117,12 +161,20 @@ async def create_hcode_agent(
     interrupt_on: dict | None = None,
     active_skills: list[str] | None = None,
     model: str | None = None,
+    fallback_models: list[str] | None = None,
+    on_fallback: "Callable[[str, str], None] | None" = None,
 ):
     """Assemble the full HCode v2 agent from environment config.
 
     ``model`` (GUI model selection) overrides only the model NAME for this agent;
     ``None`` (the default and the CLI path) uses the configured model — zero
     behaviour change when the argument is absent.
+
+    ``fallback_models`` (429 resilience) + ``on_fallback`` are forwarded to
+    ``_build_model``. Falsy ``fallback_models`` (the default) keeps the exact
+    single-client behaviour; a non-empty list wraps the model so a rate-limited
+    primary retries then falls back to the next model. ``on_fallback`` is invoked
+    on a switch so the daemon can surface it to the UI.
     """
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
     from langgraph.checkpoint.memory import MemorySaver
@@ -135,7 +187,11 @@ async def create_hcode_agent(
     else:
         checkpointer = MemorySaver()
 
-    chat_model = _build_model(model_override=model)
+    chat_model = _build_model(
+        model_override=model,
+        fallback_models=fallback_models,
+        on_fallback=on_fallback,
+    )
 
     # Create backend ONCE — shared by SummarizationMiddleware and agent.
     # virtual_mode=False: the deepagents builtins use REAL OS paths anchored at
