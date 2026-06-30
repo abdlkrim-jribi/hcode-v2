@@ -84,6 +84,7 @@ export type HcodeMessage =
     | { type: 'verification_started'; payload: { timestamp: number } }
     | { type: 'plan_created';        payload: { markdown: string; taskMd: string; implementationPlanMd: string; timestamp?: number } }
     | { type: 'aborted';             payload?: { message?: string } }
+    | { type: 'model_fallback';      payload: { from: string; to: string; message?: string } }
     | { type: 'done';                payload?: { summary?: string; timestamp?: number } };
 
 // ── Conversation model — Turn ──────────────────────────────────────────────────

@@ -216,6 +216,9 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
     _mockCancel = () => timers.forEach(clearTimeout);
 
     const wantsError = /\b(fail|error|boom)\b/i.test(task);
+    // Keyless demo of the 429 resilience feature: a task mentioning "429" /
+    // "rate limit" shows the primary→fallback switch as a model_fallback line.
+    const wantsFallback = /\b(429|rate.?limit)\b/i.test(task);
 
     // Two files; hello.py is first written with a type error, then re-proposed
     // corrected after the LSP catches it (same path -> exercises diff dedupe).
@@ -263,6 +266,15 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
 
     // ── Execute: two files ──────────────────────────────────────────────────
     after(250, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
+    // Keyless demo: surface a primary→fallback switch (the real daemon emits this
+    // when ResilientChatModel exhausts retries on a rate-limited primary).
+    if (wantsFallback) {
+        after(150, () => emit({ type: 'model_fallback', payload: {
+            from: 'qwen/qwen-2.5-coder-32b:free',
+            to: 'deepseek/deepseek-chat:free',
+            message: 'qwen/qwen-2.5-coder-32b:free rate-limited — switched to deepseek/deepseek-chat:free',
+        } }));
+    }
     after(200, () => emit({ type: 'streaming_chunk',   payload: { content: 'Writing the two files...', phase: 'execute' } }));
     after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/hello.py`', step: 'tool:write' } }));
     after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
