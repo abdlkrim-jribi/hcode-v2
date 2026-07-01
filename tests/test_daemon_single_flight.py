@@ -36,7 +36,7 @@ def test_second_concurrent_run_task_is_rejected(monkeypatch, restore_stdout):
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _hang(req_id, task, thread_id, work_dir=None, active_skills=None, model=None):
+    async def _hang(req_id, task, thread_id, work_dir=None, active_skills=None, model=None, plan_review=False):
         started.set()
         await release.wait()
 

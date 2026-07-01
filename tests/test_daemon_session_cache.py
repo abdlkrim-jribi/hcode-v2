@@ -123,7 +123,7 @@ def test_run_task_dispatch_validates_model_param(monkeypatch, restore_stdout):
     """Non-string / blank model params degrade to None (the default) — no crash."""
     captured: list = []
 
-    async def _capture(req_id, task, thread_id, work_dir=None, active_skills=None, model=None):
+    async def _capture(req_id, task, thread_id, work_dir=None, active_skills=None, model=None, plan_review=False):
         captured.append(model)
 
     daemon = JsonRpcDaemon(mock=False)
