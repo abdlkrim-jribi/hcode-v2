@@ -135,6 +135,20 @@ export function applyAgentMessage(turn: Turn, msg: HcodeMessage): Turn {
         case 'circuit_break':
             return { ...turn, error: msg.payload.reason, phase: 'error' };
 
+        // ── Model fallback (429 resilience) ─────────────────────────────────────
+        // Surface the primary→fallback switch as an info line in the activity lane
+        // so the user sees the rate-limit was handled, not a stall.
+        case 'model_fallback':
+            return {
+                ...turn,
+                activities: [...turn.activities, newActivity({
+                    kind: 'info',
+                    label: msg.payload.message
+                        ?? `Primary rate-limited — switched to ${msg.payload.to}`,
+                    step: 'model_fallback',
+                })],
+            };
+
         // ── Abort ──────────────────────────────────────────────────────────────
         // Idempotent: if ABORT_ACTIVE already set phase to 'done', this is a
         // no-op. If the daemon event arrives first (e.g. race on WS path), it

@@ -559,6 +559,42 @@ class JsonRpcDaemon:
         thread_id: str = params.get("thread_id") or f"gui_wf_{abs(hash(name))}"
         self._current_task = asyncio.create_task(self._run_task(req_id, f"run workflow {name}", thread_id))
 
+    # ── Model fallback (429 resilience) ────────────────────────────────────────
+    #
+    # When enabled, a rate-limited primary model retries with backoff then falls
+    # back to the next free tool-capable model. OFF by default → no resilience
+    # wrapper is built → zero regression, zero added latency.
+    #
+    # Enable + order resolution (first wins):
+    #   1. HCODE_FALLBACK_MODELS="a,b,c"  — explicit ordered fallbacks (enables it)
+    #   2. HCODE_MODEL_FALLBACK=auto       — derive from list_models (free + tool-
+    #                                        capable), minus the primary, capped
+    #   else                               — OFF (empty list)
+
+    _MAX_AUTO_FALLBACKS = 3
+
+    async def _resolve_fallbacks(self, primary: Optional[str]) -> list[str]:
+        """Return the ordered fallback model names (excluding the primary), or []."""
+        explicit = os.getenv("HCODE_FALLBACK_MODELS", "").strip()
+        if explicit:
+            names = [s.strip() for s in explicit.split(",") if s.strip()]
+        elif os.getenv("HCODE_MODEL_FALLBACK", "").strip().lower() == "auto":
+            try:
+                models = await self._get_models()  # cached free + tool-capable list
+            except Exception:  # noqa: BLE001 - discovery must never break a run
+                models = []
+            names = [m["id"] for m in models]
+        else:
+            return []  # feature off
+
+        # Drop the primary (it's already index 0 in the resilient client) + dups.
+        primary_name = primary or ""
+        out: list[str] = []
+        for n in names:
+            if n and n != primary_name and n not in out:
+                out.append(n)
+        return out[: self._MAX_AUTO_FALLBACKS]
+
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
     async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None) -> None:
@@ -602,6 +638,18 @@ class JsonRpcDaemon:
                     cached = None
                     del self._agents[thread_id]
                 if cached is None:
+                    # 429 resilience: resolve the fallback order (empty = feature
+                    # off → unchanged single-model agent). on_fallback surfaces a
+                    # switch to the UI as a model_fallback event.
+                    fallback_models = await self._resolve_fallbacks(model)
+                    on_fallback = (
+                        (lambda frm, to: self.emit_event(
+                            "model_fallback",
+                            {"from": frm, "to": to,
+                             "message": f"{frm} rate-limited — switched to {to}"},
+                        ))
+                        if fallback_models else None
+                    )
                     agent = await create_hcode_agent(
                         skills_dir=self._skills_dir,
                         workflows_dir=self._workflows_dir,
@@ -611,6 +659,8 @@ class JsonRpcDaemon:
                         work_dir=work_dir,
                         active_skills=list(skills_key) if skills_key else None,
                         model=model,
+                        fallback_models=fallback_models,
+                        on_fallback=on_fallback,
                     )
                     self._agents[thread_id] = {
                         "agent": agent, "work_dir": work_dir,
