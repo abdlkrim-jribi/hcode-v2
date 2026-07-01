@@ -43,6 +43,10 @@ interface AgentPanelProps {
     modelsLoading: boolean;
     selectedModel: string | null;
     onSelectModel: (id: string | null) => void;
+    /** Plan review (HITL): per-session toggle + accept/reject callback. */
+    planReview: boolean;
+    onTogglePlanReview: (on: boolean) => void;
+    onPlanDecision: (turnId: string, accept: boolean) => void;
 }
 
 export default function AgentPanel({
@@ -69,6 +73,9 @@ export default function AgentPanel({
     modelsLoading,
     selectedModel,
     onSelectModel,
+    planReview,
+    onTogglePlanReview,
+    onPlanDecision,
 }: AgentPanelProps) {
     return (
         <div className="hcode-agentchat">
@@ -86,6 +93,8 @@ export default function AgentPanel({
                 modelsLoading={modelsLoading}
                 selectedModel={selectedModel}
                 onSelectModel={onSelectModel}
+                planReview={planReview}
+                onTogglePlanReview={onTogglePlanReview}
             />
             {notice && (
                 <div className="hcode-agent-notice">
@@ -98,6 +107,7 @@ export default function AgentPanel({
                 onReviewDiffs={onReviewDiffs}
                 onFileDecision={onFileDecision}
                 onDismissError={onDismissError}
+                onPlanDecision={onPlanDecision}
             />
             <Composer
                 disabled={isBusy}

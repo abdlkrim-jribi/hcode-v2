@@ -11,9 +11,10 @@ interface Props {
     onReviewDiffs: (turnId: string) => void;
     onFileDecision: (turnId: string, path: string, accepted: boolean) => void;
     onDismissError: (turnId: string) => void;
+    onPlanDecision?: (turnId: string, accept: boolean) => void;
 }
 
-export default function ConversationView({ turns, onReviewDiffs, onFileDecision, onDismissError }: Props) {
+export default function ConversationView({ turns, onReviewDiffs, onFileDecision, onDismissError, onPlanDecision }: Props) {
     const endRef = useRef<HTMLDivElement>(null);
 
     // Follow the stream as new turns/tokens arrive. 'auto' (not 'smooth') keeps
@@ -45,6 +46,7 @@ export default function ConversationView({ turns, onReviewDiffs, onFileDecision,
                     onReviewDiffs={onReviewDiffs}
                     onFileDecision={onFileDecision}
                     onDismissError={onDismissError}
+                    onPlanDecision={onPlanDecision}
                 />
             ))}
             <div ref={endRef} />

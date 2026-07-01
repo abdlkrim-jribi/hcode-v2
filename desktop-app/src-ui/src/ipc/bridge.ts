@@ -193,6 +193,9 @@ const MOCK_FILES: Record<string, string> = {
 
 let _mockListeners: Array<(e: { payload: unknown }) => void> = [];
 let _mockCancel: (() => void) | null = null;
+// Plan review (HITL) demo: when a mock run pauses for review, this holds the
+// continuation. resume_plan(accept) invokes it (accept → execute; reject → stop).
+let _mockResume: ((accept: boolean) => void) | null = null;
 
 /**
  * Emit a SINGLE coherent mock event stream for one task -- the SAME event
@@ -207,13 +210,14 @@ let _mockCancel: (() => void) | null = null;
  *     composer re-enables -- no resubmit graveyard).
  *   - mode "fast" -> skip the plan phase.
  */
-function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
+function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning', planReview = false): void {
     _mockCancel?.();
+    _mockResume = null;
     const emit = (msg: HcodeMessage) => _mockListeners.forEach(fn => fn({ payload: msg }));
     const timers: ReturnType<typeof setTimeout>[] = [];
     let t = 0;
     const after = (ms: number, fn: () => void) => timers.push(setTimeout(fn, t += ms));
-    _mockCancel = () => timers.forEach(clearTimeout);
+    _mockCancel = () => { timers.forEach(clearTimeout); _mockResume = null; };
 
     const wantsError = /\b(fail|error|boom)\b/i.test(task);
     // Keyless demo of the 429 resilience feature: a task mentioning "429" /
@@ -253,10 +257,27 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
             after(350, () => emit({ type: 'error', payload: { message: 'Connection error.', suggestion: '' } }));
             return;
         }
+        const planMd = `## Plan\n1. Inspect the codebase\n2. ${task}\n3. Run tests & verify`;
         after(350, () => emit({ type: 'plan_created', payload: {
-            markdown: `## Plan\n1. Inspect the codebase\n2. ${task}\n3. Run tests & verify`,
+            markdown: planMd,
             taskMd: task, implementationPlanMd: `Implement: ${task}`, timestamp: Date.now(),
         } }));
+        // Plan review (HITL) demo: pause after the plan; resume_plan(accept) drives
+        // the rest. Mirrors the daemon's plan_review interrupt + resume_plan loop.
+        if (planReview) {
+            after(150, () => emit({ type: 'plan_review', payload: { plan: planMd } }));
+            _mockResume = (accept: boolean) => {
+                _mockResume = null;
+                if (!accept) {
+                    emit({ type: 'plan_rejected', payload: { message: 'Plan rejected — execution skipped.' } });
+                    emit({ type: 'done', payload: { summary: 'Plan rejected — nothing executed.', timestamp: Date.now() } });
+                    return;
+                }
+                t = 0;  // schedule the resumed events relative to now, not plan time
+                runExecuteVerify();
+            };
+            return;  // stop here until the user decides
+        }
     } else if (wantsError) {
         after(0,   () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
         after(250, () => emit({ type: 'streaming_chunk',   payload: { content: `Working on: ${task}…`, phase: 'execute' } }));
@@ -264,36 +285,40 @@ function _fireMock(task: string, mode: 'planning' | 'fast' = 'planning'): void {
         return;
     }
 
-    // ── Execute: two files ──────────────────────────────────────────────────
-    after(250, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
-    // Keyless demo: surface a primary→fallback switch (the real daemon emits this
-    // when ResilientChatModel exhausts retries on a rate-limited primary).
-    if (wantsFallback) {
-        after(150, () => emit({ type: 'model_fallback', payload: {
-            from: 'qwen/qwen-2.5-coder-32b:free',
-            to: 'deepseek/deepseek-chat:free',
-            message: 'qwen/qwen-2.5-coder-32b:free rate-limited — switched to deepseek/deepseek-chat:free',
-        } }));
-    }
-    after(200, () => emit({ type: 'streaming_chunk',   payload: { content: 'Writing the two files...', phase: 'execute' } }));
-    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/hello.py`', step: 'tool:write' } }));
-    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
-    after(150, () => emit({ type: 'file_patch', payload: helloBad }));
-    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/utils.py`', step: 'tool:write' } }));
-    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
-    after(150, () => emit({ type: 'file_patch', payload: utils }));
+    // ── Execute + verify (also the plan-review "accept" continuation) ────────
+    function runExecuteVerify(): void {
+        after(250, () => emit({ type: 'execution_started', payload: { timestamp: Date.now() } }));
+        // Keyless demo: surface a primary→fallback switch (the real daemon emits
+        // this when ResilientChatModel exhausts retries on a rate-limited primary).
+        if (wantsFallback) {
+            after(150, () => emit({ type: 'model_fallback', payload: {
+                from: 'qwen/qwen-2.5-coder-32b:free',
+                to: 'deepseek/deepseek-chat:free',
+                message: 'qwen/qwen-2.5-coder-32b:free rate-limited — switched to deepseek/deepseek-chat:free',
+            } }));
+        }
+        after(200, () => emit({ type: 'streaming_chunk',   payload: { content: 'Writing the two files...', phase: 'execute' } }));
+        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/hello.py`', step: 'tool:write' } }));
+        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
+        after(150, () => emit({ type: 'file_patch', payload: helloBad }));
+        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `write` -> `src/utils.py`', step: 'tool:write' } }));
+        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `write`', step: 'tool_result:write' } }));
+        after(150, () => emit({ type: 'file_patch', payload: utils }));
 
-    // ── Verify with LSP: error -> fix -> clean (always shown, the W3.3 lane) ─
-    after(300, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
-    after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (2 files)...', step: 'lsp_verify:started' } }));
-    after(350, () => emit({ type: 'task_update', payload: { markdown: '**Language server found 1 error** - `src/hello.py:3` expected `int`, got `str`. Looping back to fix.', step: 'lsp_verify:errors' } }));
-    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `edit` -> `src/hello.py`', step: 'tool:edit' } }));
-    after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `edit`', step: 'tool_result:edit' } }));
-    after(150, () => emit({ type: 'file_patch', payload: helloFixed }));
-    after(300, () => emit({ type: 'task_update', payload: { markdown: '**Language server check passed** - no errors.', step: 'lsp_verify:clean' } }));
-    after(200, () => emit({ type: 'streaming_chunk', payload: { content: 'All checks pass.', phase: 'verify' } }));
-    after(200, () => emit({ type: 'verification', payload: { markdown: `Task "${task}" complete - 2 files changed, type-checked clean.`, passed: true, testResults: '2 files - 0 type errors' } }));
-    after(200, () => emit({ type: 'done', payload: { summary: `Completed: ${task}`, timestamp: Date.now() } }));
+        // ── Verify with LSP: error -> fix -> clean (always shown, the W3.3 lane) ─
+        after(300, () => emit({ type: 'verification_started', payload: { timestamp: Date.now() } }));
+        after(200, () => emit({ type: 'task_update', payload: { markdown: '**Verifying with language server** (2 files)...', step: 'lsp_verify:started' } }));
+        after(350, () => emit({ type: 'task_update', payload: { markdown: '**Language server found 1 error** - `src/hello.py:3` expected `int`, got `str`. Looping back to fix.', step: 'lsp_verify:errors' } }));
+        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Running tool:** `edit` -> `src/hello.py`', step: 'tool:edit' } }));
+        after(250, () => emit({ type: 'task_update', payload: { markdown: '**Tool done:** `edit`', step: 'tool_result:edit' } }));
+        after(150, () => emit({ type: 'file_patch', payload: helloFixed }));
+        after(300, () => emit({ type: 'task_update', payload: { markdown: '**Language server check passed** - no errors.', step: 'lsp_verify:clean' } }));
+        after(200, () => emit({ type: 'streaming_chunk', payload: { content: 'All checks pass.', phase: 'verify' } }));
+        after(200, () => emit({ type: 'verification', payload: { markdown: `Task "${task}" complete - 2 files changed, type-checked clean.`, passed: true, testResults: '2 files - 0 type errors' } }));
+        after(200, () => emit({ type: 'done', payload: { summary: `Completed: ${task}`, timestamp: Date.now() } }));
+    }
+
+    runExecuteVerify();
 }
 
 async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -342,11 +367,16 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
             // a task containing "busy" rejects exactly as a 2nd concurrent run_task would.
             if (/\bbusy\b/i.test(task)) throw new Error('A task is already running');
             console.info('[Mock IPC] run_task thread_id =', args?.thread_id ?? '(none)',
-                         'model =', args?.model ?? '(default)');
-            _fireMock(task, (args?.mode as 'planning' | 'fast') || 'planning');
+                         'model =', args?.model ?? '(default)',
+                         'plan_review =', args?.plan_review ?? false);
+            _fireMock(task, (args?.mode as 'planning' | 'fast') || 'planning', Boolean(args?.plan_review));
             return undefined;
         }
         case 'abort_task':        if (_mockCancel) { _mockCancel(); _mockCancel = null; } return undefined;
+        case 'resume_plan':
+            // HITL plan review: drive the paused mock run with the decision.
+            if (_mockResume) { _mockResume(Boolean(args?.accept)); }
+            return { status: _mockResume ? 'resumed' : 'no_pending_plan' };
         case 'approve_plan': case 'reject_plan':
         case 'accept_patch': case 'reject_patch': case 'rollback_all': return undefined;
         default: console.warn(`[Mock IPC] Unknown: ${cmd}`); return undefined;
@@ -383,6 +413,7 @@ export async function runTask(
     threadId?: string, workDir?: string,
     activeSkills?: string[] | null,
     model?: string | null,
+    planReview?: boolean,
 ): Promise<void> {
     const params: Record<string, unknown> = { task, mode, autonomous };
     if (threadId) params.thread_id = threadId;
@@ -393,10 +424,16 @@ export async function runTask(
     // Send the model NAME only (never a key) when one is chosen; omitting it
     // tells the daemon to use the .env default model (zero regression).
     if (model) params.model = model;
+    // Only send plan_review when ON; omitting it = the default run-through.
+    if (planReview) params.plan_review = true;
     return (await getInvoke())('run_task', params) as Promise<void>;
 }
 export async function abortTask(): Promise<void> {
     return (await getInvoke())('abort_task') as Promise<void>;
+}
+/** Plan review (HITL): resolve a paused plan with accept (continue) / reject (stop). */
+export async function resumePlan(accept: boolean): Promise<void> {
+    return (await getInvoke())('resume_plan', { accept }) as Promise<void>;
 }
 export async function approvePlan(): Promise<void> {
     return (await getInvoke())('approve_plan') as Promise<void>;
