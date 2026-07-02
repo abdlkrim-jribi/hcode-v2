@@ -45,6 +45,7 @@ type Action =
   | { type: 'ROLLBACK_TURN'; turnId: string }
   | { type: 'SET_REVIEW_TURN'; turnId: string | null }
   | { type: 'ABORT_ACTIVE' }
+  | { type: 'PLAN_REVIEWED'; turnId: string }
   | { type: 'CLEAR_TURN_ERROR'; turnId: string }
   | { type: 'REMOVE_TURN'; id: string }
   | { type: 'SET_SESSIONS'; sessions: string[] }
@@ -98,9 +99,19 @@ function reducer(state: AppState, action: Action): AppState {
       const last = state.turns[i];
       if (last.phase === 'done' || last.phase === 'error') return state;
       const turns = state.turns.slice();
-      turns[i] = { ...last, phase: 'done', answer: last.answer || '_(aborted)_' };
+      // Also clear awaitingReview: aborting a run paused for plan review must
+      // dismiss the stale Accept/Reject buttons, not leave them dangling.
+      turns[i] = { ...last, phase: 'done', answer: last.answer || '_(aborted)_', awaitingReview: false };
       return { ...state, turns };
     }
+
+    case 'PLAN_REVIEWED':
+      // Optimistic: hide the Accept/Reject buttons the instant one is clicked, so
+      // a slow daemon round-trip can't produce a double-submit. The authoritative
+      // state still arrives via execution_started (accept) / plan_rejected (reject).
+      return { ...state, turns: state.turns.map(t => t.id !== action.turnId ? t : {
+        ...t, awaitingReview: false,
+      }) };
 
     case 'CLEAR_TURN_ERROR':
       return { ...state, turns: state.turns.map(t => t.id !== action.turnId ? t : {
@@ -180,6 +191,12 @@ export default function App() {
     try { const s = localStorage.getItem('hcode-session-models'); return s ? JSON.parse(s) : {}; }
     catch { return {}; }
   });
+  // Per-session plan-review toggle (HITL). Default off = today's run-through. Same
+  // localStorage convention; keyed by thread_id so it survives reloads per session.
+  const [sessionPlanReview, setSessionPlanReview] = useState<Record<string, boolean>>(() => {
+    try { const s = localStorage.getItem('hcode-session-plan-review'); return s ? JSON.parse(s) : {}; }
+    catch { return {}; }
+  });
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
@@ -206,6 +223,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('hcode-editor-settings', JSON.stringify(editorSettings)); }, [editorSettings]);
   useEffect(() => { try { localStorage.setItem('hcode-session-names', JSON.stringify(sessionNames)); } catch { /* storage unavailable */ } }, [sessionNames]);
   useEffect(() => { try { localStorage.setItem('hcode-session-models', JSON.stringify(sessionModels)); } catch { /* storage unavailable */ } }, [sessionModels]);
+  useEffect(() => { try { localStorage.setItem('hcode-session-plan-review', JSON.stringify(sessionPlanReview)); } catch { /* storage unavailable */ } }, [sessionPlanReview]);
   // Fetch the live model catalog once on mount. listModels never throws an empty
   // result (the daemon falls back to the .env model), but guard anyway so a
   // transport failure just leaves the dropdown on "default".
@@ -244,6 +262,8 @@ export default function App() {
   const isBusy = activeTurn ? BUSY_PHASES.includes(activeTurn.phase) : false;
   // Model chosen for the active session (null = .env default). Persisted per session.
   const selectedModel = sessionModels[state.currentSessionId] ?? null;
+  // Plan-review toggle for the active session (default off). Persisted per session.
+  const planReviewEnabled = sessionPlanReview[state.currentSessionId] ?? false;
   const reviewTurn = state.reviewTurnId ? state.turns.find(t => t.id === state.reviewTurnId) ?? null : null;
   const pendingPatchCount = useMemo(() => state.turns.reduce((n, t) => n + t.patches.length, 0), [state.turns]);
   // Sessions for the dropdown: active first, then any session we have in-run turns
@@ -375,7 +395,9 @@ export default function App() {
       const skillsArg = activeSkills && activeSkills.size > 0 ? [...activeSkills] : null;
       // model: the session's chosen model id, or null = the daemon's .env default.
       const modelArg = sessionModels[state.currentSessionId] || null;
-      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined, skillsArg, modelArg);
+      // plan_review: the session toggle (default false) — pause after planning.
+      const planReviewArg = sessionPlanReview[state.currentSessionId] ?? false;
+      await ipc.runTask(task, mode, false, state.currentSessionId, state.workDir || undefined, skillsArg, modelArg, planReviewArg);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       if (/already running/i.test(m)) {
@@ -393,7 +415,7 @@ export default function App() {
     // over the stale (previous) workDir and keep sending it — the daemon then
     // sees the same work_dir for the thread_id and never evicts/rebuilds the
     // cached agent, so the agent keeps working in the old folder.
-  }, [state.currentSessionId, state.workDir, activeSkills, sessionModels]);
+  }, [state.currentSessionId, state.workDir, activeSkills, sessionModels, sessionPlanReview]);
 
   // Pick a model for the active session (or null = revert to the .env default).
   // Stored per thread_id; the choice is sent on the next run_task and the daemon
@@ -406,6 +428,25 @@ export default function App() {
       return next;
     });
   }, [state.currentSessionId]);
+
+  // Plan review (HITL) per-session toggle. Off = today's run-through. Locked
+  // while a task runs (the header disables it) so it can't flip mid-run.
+  const handleTogglePlanReview = useCallback((on: boolean) => {
+    setSessionPlanReview(prev => {
+      const next = { ...prev };
+      if (on) next[state.currentSessionId] = true;
+      else delete next[state.currentSessionId];
+      return next;
+    });
+  }, [state.currentSessionId]);
+
+  // Accept (continue to execute) / reject (stop) a paused plan. Optimistically
+  // hide the buttons, then resume the daemon; the daemon's events (execution_started
+  // or plan_rejected) drive the authoritative turn state.
+  const handlePlanDecision = useCallback(async (turnId: string, accept: boolean) => {
+    dispatch({ type: 'PLAN_REVIEWED', turnId });
+    try { await ipc.resumePlan(accept); } catch { /* best-effort */ }
+  }, []);
 
   const handleFileDecision = useCallback(async (turnId: string, path: string, accepted: boolean) => {
     try { if (accepted) await ipc.acceptPatch(path); else await ipc.rejectPatch(path); }
@@ -661,6 +702,9 @@ export default function App() {
                 modelsLoading={modelsLoading}
                 selectedModel={selectedModel}
                 onSelectModel={handleSelectModel}
+                planReview={planReviewEnabled}
+                onTogglePlanReview={handleTogglePlanReview}
+                onPlanDecision={handlePlanDecision}
               />
             )}
           </div>

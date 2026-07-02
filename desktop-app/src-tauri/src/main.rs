@@ -71,6 +71,7 @@ async fn run_task(
     thread_id: Option<String>, work_dir: Option<String>,
     active_skills: Option<Vec<String>>,
     model: Option<String>,
+    plan_review: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut params = serde_json::json!({ "task": task, "mode": mode, "autonomous": autonomous });
@@ -80,11 +81,21 @@ async fn run_task(
     // Model NAME only (never a key) — the daemon keeps the .env key/base_url and
     // swaps only the model. Omitted → daemon uses the configured default.
     if let Some(m)      = model        { params["model"]        = serde_json::json!(m); }
+    // plan_review: pause at the plan→execute boundary for accept/reject. Omitted
+    // or false → the daemon runs straight through (unchanged behaviour).
+    if let Some(pr)     = plan_review  { params["plan_review"]  = serde_json::json!(pr); }
     rpc(&state, "run_task", params)
 }
 #[tauri::command]
 async fn abort_task(state: State<'_, AppState>) -> Result<(), String> {
     rpc(&state, "abort", serde_json::json!({}))
+}
+// Plan review (HITL): resolve a paused plan — accept (continue to execute) or
+// reject (stop). Maps to the daemon's resume_plan method (the pre-existing
+// approve_plan/reject_plan commands predate this loop and are unused here).
+#[tauri::command]
+async fn resume_plan(accept: bool, state: State<'_, AppState>) -> Result<(), String> {
+    rpc(&state, "resume_plan", serde_json::json!({ "accept": accept }))
 }
 #[tauri::command]
 async fn approve_plan(state: State<'_, AppState>) -> Result<(), String> {
@@ -266,7 +277,7 @@ fn main() {
         .manage(AppState { daemon: Mutex::new(daemon::DaemonSupervisor::new()) })
         .invoke_handler(tauri::generate_handler![
             start_daemon, stop_daemon, daemon_health,
-            run_task, abort_task, approve_plan, reject_plan,
+            run_task, abort_task, resume_plan, approve_plan, reject_plan,
             accept_patch, reject_patch, rollback_all,
             list_skills, list_workflows, list_models, run_workflow,
             list_mcp_servers, connect_mcp_server, disconnect_mcp_server,

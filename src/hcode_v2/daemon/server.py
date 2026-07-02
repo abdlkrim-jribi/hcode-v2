@@ -98,6 +98,11 @@ class JsonRpcDaemon:
         self._mcp_config = mcp_config
         self._running = True
         self._current_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
+        # Plan review (HITL): while a run is paused at the plan→execute boundary,
+        # _run_task awaits this future; the resume_plan RPC resolves it with the
+        # accept/reject decision. None when no plan is pending. Keeping the run's
+        # task alive (awaiting) means Abort still cancels a paused run cleanly.
+        self._plan_decision_future: Optional[asyncio.Future] = None  # type: ignore[type-arg]
         # Per-session agent cache, keyed by thread_id. Each entry is a dict
         # {"agent": ..., "work_dir": str} so we can detect when the user opens
         # a different folder mid-session and evict the stale agent.
@@ -185,6 +190,7 @@ class JsonRpcDaemon:
             elif method == "connect_mcp_server":   await self._handle_connect_mcp_server(req_id, params)
             elif method == "disconnect_mcp_server": await self._handle_disconnect_mcp_server(req_id, params)
             elif method == "abort":                await self._handle_abort(req_id)
+            elif method == "resume_plan":          await self._handle_resume_plan(req_id, params)
             elif method == "shutdown":             await self._handle_shutdown(req_id)
             else:
                 self.send_response(req_id, error={"code": -32601, "message": f"Method not found: {method}"})
@@ -516,6 +522,21 @@ class JsonRpcDaemon:
         else:
             self.send_response(req_id, {"status": "no_task_running"})
 
+    async def _handle_resume_plan(self, req_id: Any, params: dict) -> None:
+        """Resolve a paused plan review with the user's accept/reject decision.
+
+        The running task is awaiting ``_plan_decision_future``; setting its result
+        unblocks _run_task, which then resumes the graph (accept → execute; reject
+        → clean stop). If nothing is paused, this is a harmless no-op.
+        """
+        accept = bool(params.get("accept"))
+        fut = self._plan_decision_future
+        if fut is None or fut.done():
+            self.send_response(req_id, {"status": "no_pending_plan"})
+            return
+        fut.set_result(accept)
+        self.send_response(req_id, {"status": "resumed", "accept": accept})
+
     async def _handle_shutdown(self, req_id: Any) -> None:
         self._running = False
         # Best-effort teardown of any live MCP subprocesses on shutdown.
@@ -550,8 +571,11 @@ class JsonRpcDaemon:
         # Validate: must be a non-empty string; anything else → None (default).
         raw_model = params.get("model")
         model: Optional[str] = raw_model if isinstance(raw_model, str) and raw_model.strip() else None
+        # plan_review: pause at the plan→execute boundary for accept/reject.
+        # Default False = unchanged run-through.
+        plan_review = bool(params.get("plan_review"))
         self._current_task = asyncio.create_task(
-            self._run_task(req_id, task, thread_id, work_dir, active_skills, model)
+            self._run_task(req_id, task, thread_id, work_dir, active_skills, model, plan_review)
         )
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
@@ -597,7 +621,7 @@ class JsonRpcDaemon:
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
-    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None) -> None:
+    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None, plan_review: bool = False) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
         try:
@@ -634,6 +658,7 @@ class JsonRpcDaemon:
                     or cached["skills_key"] != skills_key
                     or cached["mcp_key"] != mcp_key
                     or cached["model"] != model
+                    or cached["plan_review"] != plan_review
                 ):
                     cached = None
                     del self._agents[thread_id]
@@ -661,34 +686,53 @@ class JsonRpcDaemon:
                         model=model,
                         fallback_models=fallback_models,
                         on_fallback=on_fallback,
+                        plan_review=plan_review,
                     )
                     self._agents[thread_id] = {
                         "agent": agent, "work_dir": work_dir,
                         "skills_key": skills_key, "mcp_key": mcp_key,
-                        "model": model,
+                        "model": model, "plan_review": plan_review,
                     }
                 else:
                     agent = cached["agent"]
-                last_text = ""
-                async for event in agent.astream_events(
-                    {"messages": [HumanMessage(content=task)]},
-                    # recursion_limit MUST be explicit on the astream_events path:
-                    # langchain_core stamps its default (25) into the config, which
-                    # overrides the agent's bound 9999 and kills tasks after ~5 tool
-                    # rounds. Mirrors the CLI fix (cli/main.py:242). Matters more now
-                    # that PEV's execute phase runs up to 15 rounds.
-                    config={
-                        "configurable": {"thread_id": thread_id},
-                        "recursion_limit": 1000,
-                    },
-                    version="v2",
-                ):
-                    bridge.process_event(event)
-                    # Track last AI message content for the done summary
-                    if event.get("event") == "on_chat_model_end":
-                        msg = event.get("data", {}).get("output", {})
-                        if hasattr(msg, "content"):
-                            last_text = msg.content if isinstance(msg.content, str) else ""
+
+                # recursion_limit MUST be explicit on the astream_events path:
+                # langchain_core stamps its default (25) into the config, which
+                # overrides the agent's bound 9999 and kills tasks after ~5 tool
+                # rounds. Mirrors the CLI fix (cli/main.py:242). Matters more now
+                # that PEV's execute phase runs up to 15 rounds. Built once and
+                # reused for the resume streams so they target the SAME thread.
+                config = {
+                    "configurable": {"thread_id": thread_id},
+                    "recursion_limit": 1000,
+                }
+                last_text = await self._stream_agent(
+                    agent, {"messages": [HumanMessage(content=task)]}, config, bridge
+                )
+
+                # Plan review (HITL): when enabled, the graph pauses at the
+                # plan→execute boundary via PlanReviewMiddleware.interrupt(). The
+                # initial stream above then ends with the interrupt pending; here
+                # we surface the plan, await the user's decision, and resume — a
+                # port of the CLI's aget_state → Command(resume=...) loop
+                # (cli/main.py). When plan_review is OFF this block is skipped
+                # entirely, so a normal run is byte-identical to before.
+                if plan_review:
+                    from langgraph.types import Command
+                    while True:
+                        pending = await self._find_plan_interrupt(agent, config)
+                        if pending is None:
+                            break
+                        self.emit_event("plan_review", {"plan": pending.get("plan", "")})
+                        accept = await self._await_plan_decision()  # cancellable by Abort
+                        if not accept:
+                            self.emit_event(
+                                "plan_rejected",
+                                {"message": "Plan rejected — execution skipped."},
+                            )
+                        last_text = await self._stream_agent(
+                            agent, Command(resume={"accept": accept}), config, bridge
+                        )
 
                 bridge.finalize(summary=last_text)
 
@@ -701,6 +745,46 @@ class JsonRpcDaemon:
             raise
         finally:
             self._current_task = None
+            self._plan_decision_future = None
+
+    async def _stream_agent(self, agent: Any, input_: Any, config: dict, bridge: Any) -> str:
+        """Drive one astream_events pass, forwarding events to the bridge.
+
+        Returns the last AI message text (the done summary). Used for both the
+        initial run and each plan-review resume so they share identical event
+        handling and config (same thread_id).
+        """
+        last_text = ""
+        async for event in agent.astream_events(input_, config=config, version="v2"):
+            bridge.process_event(event)
+            if event.get("event") == "on_chat_model_end":
+                msg = event.get("data", {}).get("output", {})
+                if hasattr(msg, "content"):
+                    last_text = msg.content if isinstance(msg.content, str) else ""
+        return last_text
+
+    async def _find_plan_interrupt(self, agent: Any, config: dict) -> Optional[dict]:
+        """Return the pending plan-review interrupt value, or None if not paused."""
+        from hcode_v2.agent.plan_review import PLAN_REVIEW_INTERRUPT
+        state = await agent.aget_state(config)
+        for intr in getattr(state, "interrupts", None) or []:
+            value = getattr(intr, "value", None)
+            if isinstance(value, dict) and value.get("type") == PLAN_REVIEW_INTERRUPT:
+                return value
+        return None
+
+    async def _await_plan_decision(self) -> bool:
+        """Block until resume_plan resolves the decision (True=accept/False=reject).
+
+        The awaiting future keeps _run_task's task alive while paused, so Abort's
+        task.cancel() propagates a CancelledError here and stops the paused run.
+        """
+        loop = asyncio.get_event_loop()
+        self._plan_decision_future = loop.create_future()
+        try:
+            return await self._plan_decision_future
+        finally:
+            self._plan_decision_future = None
 
     async def _mock_streaming_task(self, task: str) -> None:
         """Mock run_task that emits the FULL keyless-demo story without a live model.

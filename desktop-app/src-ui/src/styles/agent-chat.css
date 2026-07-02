@@ -205,6 +205,36 @@
 
 .hcode-card--plan { border-left: 2px solid var(--phase-planning); }
 
+/* Plan review (HITL): highlight the plan card + accept/reject bar while paused. */
+.hcode-card--review { border-left-color: var(--semantic-warning); }
+.hcode-review-badge {
+    font-size: var(--text-xs);
+    color: var(--semantic-warning);
+    border: 1px solid var(--semantic-warning);
+    border-radius: 4px;
+    padding: 0 6px;
+    margin-left: auto;
+}
+.hcode-plan-review {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--border-subtle);
+}
+/* Header per-session toggle for plan review. */
+.hcode-planreview-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--text-xs);
+    color: var(--fg-primary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.hcode-planreview-toggle input { cursor: pointer; margin: 0; }
+.hcode-planreview-toggle:has(input:disabled) { opacity: 0.5; cursor: default; }
+
 .hcode-card--verify.is-passed { border-left: 2px solid var(--semantic-success); }
 .hcode-card--verify.is-failed { border-left: 2px solid var(--semantic-error); }
 .hcode-card--verify.is-passed .hcode-card__title { color: var(--semantic-success); }

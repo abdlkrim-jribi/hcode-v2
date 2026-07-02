@@ -85,6 +85,8 @@ export type HcodeMessage =
     | { type: 'plan_created';        payload: { markdown: string; taskMd: string; implementationPlanMd: string; timestamp?: number } }
     | { type: 'aborted';             payload?: { message?: string } }
     | { type: 'model_fallback';      payload: { from: string; to: string; message?: string } }
+    | { type: 'plan_review';         payload: { plan: string } }
+    | { type: 'plan_rejected';       payload?: { message?: string } }
     | { type: 'done';                payload?: { summary?: string; timestamp?: number } };
 
 // ── Conversation model — Turn ──────────────────────────────────────────────────
@@ -140,6 +142,12 @@ export interface Turn {
     answer: string;
     /** SINGLE error surface for this turn (no more triple-render). */
     error: string | null;
+    /**
+     * Plan review (HITL): true while the run is paused at the plan→execute
+     * boundary awaiting the user's accept/reject. Set by the `plan_review` event,
+     * cleared on the decision. Default undefined = no pause (unchanged runs).
+     */
+    awaitingReview?: boolean;
     createdAt: string;
 }
 

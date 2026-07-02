@@ -163,6 +163,7 @@ async def create_hcode_agent(
     model: str | None = None,
     fallback_models: list[str] | None = None,
     on_fallback: "Callable[[str, str], None] | None" = None,
+    plan_review: bool = False,
 ):
     """Assemble the full HCode v2 agent from environment config.
 
@@ -175,6 +176,10 @@ async def create_hcode_agent(
     single-client behaviour; a non-empty list wraps the model so a rate-limited
     primary retries then falls back to the next model. ``on_fallback`` is invoked
     on a switch so the daemon can surface it to the UI.
+
+    ``plan_review`` (opt-in HITL) inserts ``PlanReviewMiddleware`` so the agent
+    pauses at the plan→execute boundary for human accept/reject. ``False`` (the
+    default) omits it entirely → unchanged run. Requires PEV (``enable_pev``).
     """
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
     from langgraph.checkpoint.memory import MemorySaver
@@ -225,6 +230,14 @@ async def create_hcode_agent(
         # W3.3: give Verify an LSP diagnostics provider. It self-gates — with no
         # language server installed it returns None and Verify behaves as before.
         middleware.append(PEVMiddleware(diagnostics_provider=verify_diagnostics_addendum))
+        # Plan review (opt-in): pause at the plan→execute boundary for human
+        # accept/reject. Added ONLY when plan_review=True AND PEV is on (it keys
+        # off PEV's phase contract). Absent by default → zero behaviour change.
+        # Placed right after PEV so it sees the phase PEV set. Does NOT edit
+        # vendored pev.py — reads _pev_phase/_pev_plan only.
+        if plan_review:
+            from hcode_v2.agent.plan_review import PlanReviewMiddleware
+            middleware.append(PlanReviewMiddleware())
     if enable_safety:
         middleware.append(SafetyGuardMiddleware())
     # skills_dir=None → resolve the built-in skills install-relative (CWD-independent)

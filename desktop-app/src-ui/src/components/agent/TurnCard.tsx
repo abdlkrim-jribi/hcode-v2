@@ -25,6 +25,8 @@ interface Props {
     onReviewDiffs: (turnId: string) => void;
     onFileDecision: (turnId: string, path: string, accepted: boolean) => void;
     onDismissError: (turnId: string) => void;
+    /** Plan review (HITL): accept → continue to execute; reject → stop. */
+    onPlanDecision?: (turnId: string, accept: boolean) => void;
 }
 
 const BUSY_PHASES: AgentPhase[] = ['thinking', 'planning', 'executing', 'verifying'];
@@ -109,7 +111,7 @@ function ActivityLane({ turn }: { turn: Turn }) {
 
 // ── Turn ───────────────────────────────────────────────────────────────────────
 
-export default function TurnCard({ turn, onReviewDiffs, onFileDecision, onDismissError }: Props) {
+export default function TurnCard({ turn, onReviewDiffs, onFileDecision, onDismissError, onPlanDecision }: Props) {
     const isBusy = BUSY_PHASES.includes(turn.phase);
     const plan = stripMarkers(turn.plan);
     const liveProse = stripMarkers(turn.streamingContent);
@@ -138,14 +140,39 @@ export default function TurnCard({ turn, onReviewDiffs, onFileDecision, onDismis
                 )}
 
                 {plan && (
-                    <div className="hcode-card hcode-card--plan">
+                    <div className={`hcode-card hcode-card--plan${turn.awaitingReview ? ' hcode-card--review' : ''}`}>
                         <div className="hcode-card__title">
                             <span>Plan</span>
-                            {turn.phase === 'planning' && <span className="hcode-typing">typing…</span>}
+                            {turn.phase === 'planning' && !turn.awaitingReview && <span className="hcode-typing">typing…</span>}
+                            {turn.awaitingReview && <span className="hcode-review-badge">Review required</span>}
                         </div>
                         <div className="hcode-card__body">
                             <MiniMarkdown text={plan} />
                         </div>
+                        {turn.awaitingReview && (
+                            <div className="hcode-plan-review">
+                                <button
+                                    className="hcode-btn hcode-btn--primary hcode-btn--small"
+                                    onClick={() => onPlanDecision?.(turn.id, true)}
+                                >
+                                    Accept &amp; Run
+                                </button>
+                                <button
+                                    className="hcode-btn hcode-btn--ghost hcode-btn--small"
+                                    onClick={() => onPlanDecision?.(turn.id, false)}
+                                >
+                                    Reject
+                                </button>
+                                {/* Edit is a planned fast-follow — stubbed/disabled for now. */}
+                                <button
+                                    className="hcode-btn hcode-btn--ghost hcode-btn--small"
+                                    disabled
+                                    title="Editing the plan is coming in a follow-up"
+                                >
+                                    Edit…
+                                </button>
+                            </div>
+                        )}
                     </div>
                 )}
 

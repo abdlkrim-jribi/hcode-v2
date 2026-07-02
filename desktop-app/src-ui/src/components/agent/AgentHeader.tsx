@@ -33,6 +33,9 @@ interface Props {
     selectedModel: string | null;
     /** Pick a model id, or null to revert to the default. */
     onSelectModel: (id: string | null) => void;
+    /** Plan review (HITL) per-session toggle — default off. */
+    planReview: boolean;
+    onTogglePlanReview: (on: boolean) => void;
 }
 
 /** Compact display label for a session id. */
@@ -54,6 +57,8 @@ export default function AgentHeader({
     modelsLoading,
     selectedModel,
     onSelectModel,
+    planReview,
+    onTogglePlanReview,
 }: Props) {
     // Inline rename of the active session. The thread_id is unchanged — only the
     // label — so daemon memory is unaffected.
@@ -151,6 +156,22 @@ export default function AgentHeader({
                         <option key={m.id} value={m.id}>Model: {m.name}</option>
                     ))}
                 </select>
+
+                {/* Plan review (HITL) toggle — per session, default off. When on,
+                    the next run pauses at the plan→execute boundary for accept/reject.
+                    Locked while a task runs (can't flip mid-run). */}
+                <label
+                    className="hcode-planreview-toggle"
+                    title="Pause after planning to accept or reject before the agent executes"
+                >
+                    <input
+                        type="checkbox"
+                        checked={planReview}
+                        disabled={sessionsDisabled}
+                        onChange={e => onTogglePlanReview(e.target.checked)}
+                    />
+                    <span>Review plan</span>
+                </label>
             </div>
         </div>
     );

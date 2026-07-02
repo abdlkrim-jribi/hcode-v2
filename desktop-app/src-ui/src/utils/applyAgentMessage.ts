@@ -48,7 +48,8 @@ export function applyAgentMessage(turn: Turn, msg: HcodeMessage): Turn {
         case 'planning_started':
             return { ...turn, phase: 'planning' };
         case 'execution_started':
-            return { ...turn, phase: 'executing' };
+            // Accepting a reviewed plan resumes into execute — clear the prompt.
+            return { ...turn, phase: 'executing', awaitingReview: false };
         case 'verification_started':
             return { ...turn, phase: 'verifying' };
         case 'agent_phase':          // v1 legacy phase event
@@ -134,6 +135,26 @@ export function applyAgentMessage(turn: Turn, msg: HcodeMessage): Turn {
             return { ...turn, error: msg.payload.message, phase: 'error' };
         case 'circuit_break':
             return { ...turn, error: msg.payload.reason, phase: 'error' };
+
+        // ── Plan review (HITL accept/reject) ────────────────────────────────────
+        // Pause at the plan→execute boundary: surface the plan (if not already set
+        // from plan_created) and flag the turn as awaiting a decision. The phase
+        // stays 'planning' so the composer stays locked while the user decides.
+        case 'plan_review':
+            return {
+                ...turn,
+                awaitingReview: true,
+                phase: 'planning',
+                plan: turn.plan || msg.payload.plan || '',
+            };
+        // Reject → the run stopped before execute; clear the prompt, end the turn.
+        case 'plan_rejected':
+            return {
+                ...turn,
+                awaitingReview: false,
+                phase: 'done',
+                answer: turn.answer || (msg.payload?.message ?? 'Plan rejected — execution skipped.'),
+            };
 
         // ── Model fallback (429 resilience) ─────────────────────────────────────
         // Surface the primary→fallback switch as an info line in the activity lane
