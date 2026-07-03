@@ -97,15 +97,32 @@ def read(path: str, start_line: Optional[int] = None, end_line: Optional[int] = 
     except Exception as exc:
         return f"Error reading file: {exc}"
 
+    total_lines = len(lines)
+    truncated_note = ""
     if start_line is not None or end_line is not None:
-        s = (start_line or 1) - 1
-        e = end_line if end_line is not None else len(lines)
-        lines = lines[s:e]
-    elif len(lines) > _MAX_READ_LINES:
-        lines = lines[:_MAX_READ_LINES]
+        # Number from the REAL position in the file, not from 1 — this must match
+        # what LSP diagnostics / check_diagnostics report (both use real 1-based
+        # positions), or a diagnostic at "line 105" gets cross-referenced against
+        # a read that relabeled it "line 6", poisoning self-correction.
+        offset = (start_line or 1) - 1
+        end = end_line if end_line is not None else total_lines
+        display_lines = lines[offset:end]
+    elif total_lines > _MAX_READ_LINES:
+        offset = 0
+        display_lines = lines[:_MAX_READ_LINES]
+        # A silent cutoff let the model believe the file ended at line 800 and
+        # re-append code that already exists past that point. State the real
+        # total and how to see the rest.
+        truncated_note = (
+            f"\n... [truncated: showing lines 1-{_MAX_READ_LINES} of {total_lines} "
+            "— pass start_line/end_line to see more]"
+        )
+    else:
+        offset = 0
+        display_lines = lines
 
-    numbered = "".join(f"{i + 1:4}: {l}" for i, l in enumerate(lines))
-    return numbered
+    numbered = "".join(f"{offset + i + 1:4}: {l}" for i, l in enumerate(display_lines))
+    return numbered + truncated_note
 
 
 @tool(response_format="content_and_artifact")
@@ -151,6 +168,63 @@ def write(path: str, content: str, append: bool = False) -> tuple[str, dict]:
     return content_msg, _diff_artifact(diff, additions, deletions, path)
 
 
+def _find_normalized_match(original: str, old_string: str) -> Optional[tuple[int, int, str]]:
+    """Locate the first line-block in *original* matching *old_string* by content,
+    ignoring per-line leading/trailing whitespace (e.g. an indentation mismatch).
+
+    Returns ``(start_line, end_line, matched_text)`` — 0-based start, exclusive
+    end, and ``matched_text`` the ACTUAL substring of *original* at that span, so
+    a caller can safely do ``original.replace(matched_text, ..., 1)``: it is
+    guaranteed to be a real substring, unlike the old (broken) fallback that
+    stripped only the whole block's outer ends and could silently no-op on an
+    internal indentation mismatch. ``None`` if no such block exists.
+    """
+    old_lines = old_string.splitlines()
+    if not old_lines:
+        return None
+    stripped_old = [l.strip() for l in old_lines]
+    src_lines = original.splitlines()
+    n = len(stripped_old)
+    if n > len(src_lines):
+        return None
+    for i in range(len(src_lines) - n + 1):
+        if [l.strip() for l in src_lines[i:i + n]] == stripped_old:
+            return i, i + n, "\n".join(src_lines[i:i + n])
+    return None
+
+
+def _describe_edit_miss(original: str, old_string: str, path: str) -> str:
+    """Actionable message for an edit() with no match at all (not even
+    whitespace-normalized): the closest matching region(s) via difflib, so the
+    model can correct old_string instead of guessing blind.
+    """
+    name = Path(path).name
+    old_lines = old_string.splitlines() or [old_string]
+    n = len(old_lines)
+    src_lines = original.splitlines()
+    if not src_lines:
+        return f"Error: old_string not found in {name} (file is empty)"
+
+    window_count = max(1, len(src_lines) - n + 1)
+    windows = ["\n".join(src_lines[i:i + n]) for i in range(window_count)]
+    close = difflib.get_close_matches(old_string, windows, n=3, cutoff=0.5)
+    if not close:
+        return (
+            f"Error: old_string not found in {name} "
+            f"(no similar region found among {len(src_lines)} lines)"
+        )
+
+    best = close[0]
+    best_line = windows.index(best) + 1
+    snippet = best if len(best) <= 500 else best[:500] + "…"
+    plural = "s" if len(close) != 1 else ""
+    return (
+        f"Error: old_string not found in {name}. "
+        f"Closest match ({len(close)} candidate region{plural} found) at "
+        f"line {best_line}-{best_line + n - 1}:\n{snippet}"
+    )
+
+
 @tool(response_format="content_and_artifact")
 def edit(path: str, old_string: str, new_string: str) -> tuple[str, dict]:
     """Replace an exact string in a file (first occurrence).
@@ -171,16 +245,16 @@ def edit(path: str, old_string: str, new_string: str) -> tuple[str, dict]:
     except Exception as exc:
         return f"Error reading file: {exc}", _diff_artifact("", 0, 0, path)
 
-    if old_string not in original:
-        # fuzzy fallback: strip leading whitespace per line
-        stripped_old = "\n".join(l.strip() for l in old_string.splitlines())
-        stripped_src = "\n".join(l.strip() for l in original.splitlines())
-        if stripped_old not in stripped_src:
-            return f"Error: old_string not found in {path}", _diff_artifact("", 0, 0, path)
-        # rebuild with stripped match — just do a simple replace on the stripped version
-        new_content = original.replace(old_string.strip(), new_string.strip(), 1)
-    else:
+    if old_string in original:
         new_content = original.replace(old_string, new_string, 1)
+    else:
+        match = _find_normalized_match(original, old_string)
+        if match is None:
+            return _describe_edit_miss(original, old_string, path), _diff_artifact("", 0, 0, path)
+        _, _, matched_text = match
+        # matched_text is a REAL substring of `original` (built from its own
+        # lines), so this always applies — no more whitespace-mismatch no-op.
+        new_content = original.replace(matched_text, new_string, 1)
 
     try:
         target.write_text(new_content, encoding="utf-8")
