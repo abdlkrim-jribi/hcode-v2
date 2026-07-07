@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -19,6 +20,7 @@ from deepagents.middleware.workflows import WorkflowMiddleware
 from deepagents.mcp.bridge import MCPToolRegistry
 from deepagents.mcp.client import MCPClientManager
 
+from hcode_v2.agent.harness_notes import HarnessNotesMiddleware
 from hcode_v2.agent.mcp_env import env_injecting_client_factory
 from hcode_v2.agent.path_containment import _PathContainmentMiddleware
 from hcode_v2.provider.fallback import maybe_wrap
@@ -26,6 +28,79 @@ from hcode_v2.tools.lsp_tools import verify_diagnostics_addendum
 from hcode_v2.utils.config import Config
 
 logger = logging.getLogger(__name__)
+
+# ── Harness tool hygiene (P1 path contradiction / T1 duplicate tools / T3 ask_user hang) ──
+#
+# The vendored base stack (FilesystemMiddleware, TodoListMiddleware) always
+# injects its own ls/read_file/write_file/edit_file/glob/grep/execute/
+# write_todos. Two DIFFERENT outcomes happen depending on whether HCode's own
+# same-named tool exists:
+#   - ls/glob/grep: HCode registers tools with the SAME names. create_agent
+#     merges [middleware tools] + [explicit tools=] and de-dupes by name with
+#     explicit tools winning (HCode's own tools= list is appended AFTER the
+#     middleware-injected list before the name->tool dict is built) — so
+#     HCode's ls/glob/grep (with correct containment) are ALREADY what's bound
+#     today. Adding these names to the exclusion set would DELETE them
+#     entirely (only one survives to filter against), not "pick a side" — so
+#     they are deliberately NOT excluded here.
+#   - read_file / execute / write_todos: DIFFERENT names from HCode's read /
+#     bash / todo_read+todo_write, so there is no name collision — BOTH
+#     copies survive and reach the model, doubling the menu for the same
+#     capability with a DIFFERENT (contradictory) path convention. These ARE
+#     excluded below.
+# _VERIFY_READONLY_TOOLS (pev.py, vendored) already whitelists BOTH "read_file"
+# and "read" defensively for exactly this reason; excluding "read_file" still
+# leaves "read" (HCode's own, never excluded) available in the verify phase —
+# reconciled, not broken. See tests/test_tool_name_contracts.py.
+#
+# Known trade-off (not addressed here): the vendored FilesystemMiddleware
+# prompt tells the model to use `read_file` to inspect large tool results the
+# SummarizationMiddleware has offloaded to disk. That offload always goes
+# through the backend's OWN (virtual-mode-aware) path resolution, which is a
+# separate scheme from HCode's `_resolve_path`. Whether HCode's `read` can
+# recover an offloaded result at the same nominal path is unverified here —
+# a narrow edge case (only reachable once a single tool result is large enough
+# to trigger mid-conversation summarization) outside this fix's scope.
+_EXCLUDED_BUILTIN_TOOLS: frozenset[str] = frozenset({
+    "edit_file", "write_file",  # replaced by hcode's edit/write (existing)
+    "read_file",                # replaced by hcode's read
+    "execute",                  # replaced by hcode's bash
+    "write_todos",              # replaced by hcode's todo_read/todo_write
+})
+
+# P1: state the ONE path convention authoritatively, overriding the vendored
+# fs prompt's contradictory "must start with /" line, and note the tool
+# renames above so nothing dangles. See harness_notes.py for WHY this lands
+# after the vendored prompt text on every call (ordering guarantee).
+_HARNESS_CLARITY_NOTE = (
+    "## Path & Tool Convention (authoritative — overrides any earlier note)\n\n"
+    "Ignore any instruction above claiming file paths must start with `/`. The "
+    "actual rule for every file tool in this project:\n"
+    "- Use a path RELATIVE to the working directory (e.g. `src/app.py`), or\n"
+    "- A full absolute path already inside the working directory.\n"
+    "A leading-slash path like `/app.py` is NOT a filesystem root here — it is "
+    "re-homed under the working directory.\n\n"
+    "Also ignore any mention of `read_file`, `execute`, or `write_todos` — "
+    "they are not available. Use `read` to read files (including any large "
+    "tool result saved to disk), `bash` to run shell commands, and "
+    "`todo_read`/`todo_write` to manage the task list."
+)
+
+
+def _is_interactive_stdin() -> bool:
+    """True when stdin is a real TTY (the CLI's interactive session).
+
+    False for anything non-interactive — critically, the daemon's stdin IS the
+    JSON-RPC channel (server.py's run() loop reads it for incoming requests).
+    ask_user/confirm block on input(); calling either mid-daemon-run would
+    either hang the run or consume the next RPC request as the "answer" (T3).
+    Checked once at agent-build time — a process's stdin tty-ness is fixed for
+    its whole lifetime, so this never needs re-checking mid-session.
+    """
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
 
 
 def _build_one_model(model_name: str, config: Config, max_tokens: int,
@@ -260,20 +335,30 @@ async def create_hcode_agent(
     # Route the model OFF the deepagents builtin mutating file tools and onto
     # hcode's own edit/write/multi_edit, which return response_format=
     # "content_and_artifact" so a structured diff flows to the live renderer.
-    # edit_file/write_file are the redundant mutating builtins we replace; the
-    # read-side builtins (read_file/ls/glob/grep) stay — FilesystemMiddleware
-    # scaffolding relies on its read path. Must be appended LAST: it filters
+    # Also strips the OTHER differently-named duplicates (read_file/execute/
+    # write_todos — see _EXCLUDED_BUILTIN_TOOLS above for why ls/glob/grep are
+    # NOT in this set) and, in a non-interactive (daemon) run, ask_user/confirm
+    # (T3 — their input() would hang the run or eat the next RPC as stdin is
+    # the JSON-RPC channel there, not a TTY). Must be appended LATE: it filters
     # tools at model-call time and has to run after the tool-injecting
-    # middleware (FilesystemMiddleware) to strip the builtins they inject.
+    # middleware (FilesystemMiddleware/TodoListMiddleware) to strip the
+    # builtins they inject.
     # NOTE: imports a PRIVATE deepagents symbol (_tool_exclusion) — intentional;
     # revisit on a deepagents re-vendor if that module path changes.
-    middleware.append(_ToolExclusionMiddleware(excluded=frozenset({"edit_file", "write_file"})))
+    excluded_tools = set(_EXCLUDED_BUILTIN_TOOLS)
+    if not _is_interactive_stdin():
+        excluded_tools |= {"ask_user", "confirm"}
+    middleware.append(_ToolExclusionMiddleware(excluded=frozenset(excluded_tools)))
+    # P1: one authoritative path/tool-naming correction, appended after every
+    # vendored prompt segment above (ordering guaranteed — see harness_notes.py).
+    middleware.append(HarnessNotesMiddleware(_HARNESS_CLARITY_NOTE))
     # Containment at the EXECUTION seam: re-home the path arg of every file tool
     # (builtins AND hcode's) through _resolve_path before the tool runs, so a
     # bound-but-uncontained builtin the model calls from memory (e.g. write_file
-    # with "/x.py") can't escape the working dir. Menu exclusion above hides the
-    # mutating builtins; this guards the rest (read_file/ls/glob/grep) and any
-    # excluded builtin still named from memory. HCode-side; deepagents untouched.
+    # with "/x.py") can't escape the working dir. Menu exclusion above hides
+    # most duplicates; this guards whatever tool actually runs (ls/glob/grep,
+    # hcode's own, or any excluded builtin still named from memory). HCode-side;
+    # deepagents untouched.
     middleware.append(_PathContainmentMiddleware())
 
     mcp_tools = []
