@@ -23,6 +23,7 @@ from deepagents.mcp.client import MCPClientManager
 from hcode_v2.agent.harness_notes import HarnessNotesMiddleware
 from hcode_v2.agent.mcp_env import env_injecting_client_factory
 from hcode_v2.agent.path_containment import _PathContainmentMiddleware
+from hcode_v2.agent.project_map import build_project_map
 from hcode_v2.provider.fallback import maybe_wrap
 from hcode_v2.tools.lsp_tools import verify_diagnostics_addendum
 from hcode_v2.utils.config import Config
@@ -208,6 +209,9 @@ def _build_env_block(work_dir: str) -> str:
     runs with ``virtual_mode=False`` (real OS paths): a bare ``/foo`` would
     resolve to the drive root, so the model is told to use relative or full
     absolute paths.
+
+    Kept declarative-facts-only (no file listing) on purpose — the ``<project_map>``
+    tree lives in a SEPARATE block assembled by ``_build_context_prompt``.
     """
     root = Path(work_dir).resolve()
     is_git = "yes" if (root / ".git").exists() else "no"
@@ -222,6 +226,22 @@ def _build_env_block(work_dir: str) -> str:
         "/temps5.py.\n"
         "</env>"
     )
+
+
+def _build_context_prompt(work_dir: str) -> str:
+    """The full USER system-prompt segment: the ``<env>`` facts block plus, when
+    the working directory yields one, a ``<project_map>`` (bounded tree + manifest
+    + README) so the PLAN phase can name REAL files instead of fabricating them —
+    the audit's #1 finding.
+
+    Built ONCE at agent-build time. The agent is cached per work_dir, so the map
+    refreshes on a folder switch (cache eviction) and is NOT rebuilt per task. An
+    empty/unreadable dir → ``build_project_map`` returns ``""`` → only the env
+    block is used, exactly the pre-existing (map-less) behaviour (zero regression).
+    """
+    env_block = _build_env_block(work_dir)
+    project_map = build_project_map(str(Path(work_dir).resolve()))
+    return f"{env_block}\n\n{project_map}" if project_map else env_block
 
 
 async def create_hcode_agent(
@@ -388,6 +408,8 @@ async def create_hcode_agent(
         checkpointer=checkpointer,
         interrupt_on=interrupt_on,
         # Prepended above BASE_AGENT_PROMPT (USER segment); PEV appends its phase
-        # prompts below, so this orientation block is present in every phase.
-        system_prompt=_build_env_block(resolved_work_dir),
+        # prompts below, so this orientation context (env facts + project map) is
+        # present in every phase — critically the PLAN phase, which must name real
+        # files.
+        system_prompt=_build_context_prompt(resolved_work_dir),
     )
