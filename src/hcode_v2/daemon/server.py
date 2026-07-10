@@ -574,8 +574,14 @@ class JsonRpcDaemon:
         # plan_review: pause at the plan→execute boundary for accept/reject.
         # Default False = unchanged run-through.
         plan_review = bool(params.get("plan_review"))
+        # mode: the composer's Plan/Fast toggle. "planning" forces the full PEV
+        # arc (plan→execute→verify) even for tasks the classifier would route to
+        # "fast"; "fast" or absent leaves the classifier's verdict untouched
+        # (today's behaviour). Only "planning" has an effect — any other value
+        # (incl. absent/None) → force_plan=False → zero change.
+        force_plan = params.get("mode") == "planning"
         self._current_task = asyncio.create_task(
-            self._run_task(req_id, task, thread_id, work_dir, active_skills, model, plan_review)
+            self._run_task(req_id, task, thread_id, work_dir, active_skills, model, plan_review, force_plan)
         )
 
     async def _handle_run_workflow_dispatch(self, req_id: Any, params: dict) -> None:
@@ -621,7 +627,7 @@ class JsonRpcDaemon:
 
     # ── run_task — C2: astream_events + StreamingBridge ──────────────────────
 
-    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None, plan_review: bool = False) -> None:
+    async def _run_task(self, req_id: Any, task: str, thread_id: str, work_dir: Optional[str] = None, active_skills: Optional[list[str]] = None, model: Optional[str] = None, plan_review: bool = False, force_plan: bool = False) -> None:
         """Execute one task, streaming events to the client via StreamingBridge."""
         self.send_response(req_id, {"status": "started", "thread_id": thread_id})
         try:
@@ -659,6 +665,7 @@ class JsonRpcDaemon:
                     or cached["mcp_key"] != mcp_key
                     or cached["model"] != model
                     or cached["plan_review"] != plan_review
+                    or cached["force_plan"] != force_plan
                 ):
                     cached = None
                     del self._agents[thread_id]
@@ -687,11 +694,13 @@ class JsonRpcDaemon:
                         fallback_models=fallback_models,
                         on_fallback=on_fallback,
                         plan_review=plan_review,
+                        force_plan=force_plan,
                     )
                     self._agents[thread_id] = {
                         "agent": agent, "work_dir": work_dir,
                         "skills_key": skills_key, "mcp_key": mcp_key,
                         "model": model, "plan_review": plan_review,
+                        "force_plan": force_plan,
                     }
                 else:
                     agent = cached["agent"]

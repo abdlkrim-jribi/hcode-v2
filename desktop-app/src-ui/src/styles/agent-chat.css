@@ -420,7 +420,8 @@
     cursor: pointer;
 }
 .hcode-mode-btn.is-active {
-    background: var(--surface-3);
-    border-color: var(--border-strong, var(--border-default));
-    color: var(--fg-primary);
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
 }

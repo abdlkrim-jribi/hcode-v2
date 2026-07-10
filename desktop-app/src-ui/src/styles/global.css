@@ -474,8 +474,9 @@ body,
 }
 
 .hcode-mode-btn.is-active {
-    background: var(--surface-4);
-    color: var(--fg-primary);
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
 }
 
 .hcode-composer-hint {
