@@ -454,6 +454,83 @@ def _format_verify_addendum(errors_by_file: dict[str, list[Diagnostic]]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _format_post_edit_addendum(errors_by_file: dict[str, list[Diagnostic]]) -> str:
+    """Render the post-edit tool-result addendum from per-file error diagnostics.
+
+    Tool-result voice (vs the verify-prompt voice of ``_format_verify_addendum``):
+    the model reads this as part of the edit's result and should fix immediately —
+    no PEV verdict-marker instructions here, this fires in any phase.
+    """
+    total = sum(len(v) for v in errors_by_file.values())
+    lines = [
+        "",
+        "--- Language server check (post-edit) ---",
+        (
+            f"pyright found {total} ERROR(S) in the file(s) after this edit. These are "
+            "real type/syntax errors, not style warnings. Fix them now with another "
+            "edit before continuing:"
+        ),
+    ]
+    for fpath, errs in errors_by_file.items():
+        lines.append(f"{_relativize(Path(fpath))}:")
+        for d in sorted(errs, key=lambda d: (d.line, d.range.start.character)):
+            code = f" [{d.code}]" if d.code else ""
+            lines.append(f"- line {d.line + 1}, col {d.range.start.character + 1}: {d.message}{code}")
+    return "\n".join(lines)
+
+
+async def post_edit_diagnostics(paths: Iterable[str]) -> Optional[str]:
+    """Post-edit gate provider: ERROR diagnostics for just-edited files.
+
+    Same machinery as :func:`verify_diagnostics_addendum` (resolve paths -> sync
+    documents -> errors-only filter -> ``lsp_verify`` progress events) but with a
+    tool-result addendum instead of a verify-prompt addendum, so it can ride the
+    edit tool's own result in ANY PEV phase. Returns ``None`` when there is no
+    server, no supported file, or no errors — the caller then changes nothing
+    (zero regression by construction). Never raises.
+
+    Args:
+        paths: File path(s) the tool call just wrote/edited (raw, as passed to
+            the tool — absolute, root-relative, or virtual-root form).
+    """
+    try:
+        candidates = _resolve_verify_paths(paths)
+        usable = [(p, cfg) for p, cfg in candidates if lsp_available(cfg.language_id)]
+        if not usable:
+            return None  # no server / unsupported file -> behave as today
+
+        await _emit_verify_event(
+            {"status": "started", "fileCount": len(usable), "source": "post_edit"}
+        )
+
+        errors_by_file: dict[str, list[Diagnostic]] = {}
+        for abspath, cfg in usable:
+            client = await _MANAGER.get_client(cfg.language_id, get_root_dir())
+            if client is None:
+                continue
+            try:
+                await _sync_document(client, abspath)
+                diags = await client.get_diagnostics(abspath)
+            except (LSPError, OSError) as exc:
+                logger.debug("post-edit diagnostics failed for %s: %s", abspath, exc)
+                continue
+            errors = [d for d in diags if d.is_error]  # ERRORS ONLY
+            if errors:
+                errors_by_file[str(abspath)] = errors
+
+        total = sum(len(v) for v in errors_by_file.values())
+        await _emit_verify_event(
+            {"status": "done", "fileCount": len(usable), "errorCount": total,
+             "source": "post_edit"}
+        )
+        if not errors_by_file:
+            return None
+        return _format_post_edit_addendum(errors_by_file)
+    except Exception as exc:  # noqa: BLE001 — the gate must never break a tool call
+        logger.debug("post_edit_diagnostics failed: %s", exc)
+        return None
+
+
 async def verify_diagnostics_addendum(paths: Iterable[str]) -> Optional[str]:
     """PEV-Verify provider: ERROR diagnostics for edited files as a prompt addendum.
 
