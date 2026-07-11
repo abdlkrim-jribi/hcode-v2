@@ -45,7 +45,11 @@ pub struct FileEntry {
 async fn start_daemon(state: State<'_, AppState>, app: AppHandle) -> Result<DaemonInfo, String> {
     let mut s = state.daemon.lock().map_err(|e| e.to_string())?;
     s.start(&app).map_err(|e| e.to_string())?;
-    Ok(DaemonInfo { status: "running".to_string(), uptime: Some(0), pid: s.pid(), version: None })
+    // Report the ACTUAL status (now "starting", not a hardcoded "running"): the
+    // daemon is not ready until the reader thread sees its `ready` line, which
+    // flips the shared status and arrives on the daemon-message channel. A
+    // failed spawn instead surfaces via the daemon-error event.
+    Ok(DaemonInfo { status: s.status().to_string(), uptime: s.uptime(), pid: s.pid(), version: None })
 }
 
 #[tauri::command]

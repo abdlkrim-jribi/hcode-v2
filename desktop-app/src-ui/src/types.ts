@@ -23,10 +23,18 @@ export interface FileEntry {
 // ── Daemon info ───────────────────────────────────────────────────────────
 
 export interface DaemonInfo {
-    status: 'running' | 'error';
+    status: 'starting' | 'running' | 'stopped' | 'error';
     uptime?: number;
     pid?: number;
     version?: string;
+}
+
+/** Payload of the `daemon-error` event: why the daemon could not come up.
+ *  Secrets never appear here — only the discovery tried-list and process stderr. */
+export interface DaemonError {
+    message: string;
+    tried: string[];
+    stderr_tail: string[];
 }
 
 // ── Agent Phase System ────────────────────────────────────────────────────────
@@ -154,7 +162,7 @@ export interface Turn {
 // ── AppState ──────────────────────────────────────────────────────────────────
 
 export interface AppState {
-    daemonStatus: 'unknown' | 'running' | 'error';
+    daemonStatus: 'unknown' | 'starting' | 'running' | 'stopped' | 'error';
     workDir: string;
     fileTree: FileEntry[];
     openFilePath: string;
