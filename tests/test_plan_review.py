@@ -77,6 +77,125 @@ def test_falls_back_to_last_ai_message_when_no_pev_plan(monkeypatch):
     assert seen["plan"] == "fallback plan body"
 
 
+# ── before_agent: reachability (classifier override) + per-task re-arm ────────
+#
+# PEV's TaskClassifier routes every task WITHOUT a complex-engineering keyword
+# to the "fast" phase, which never transitions — so without the override the
+# plan→execute boundary (and therefore the interrupt) would not exist for
+# ordinary tasks. The framework runs before_agent hooks in middleware
+# registration order, merging each update into state before the next hook runs
+# (langchain agents factory chains the nodes pairwise); PlanReviewMiddleware is
+# registered AFTER PEVMiddleware in hcode's factory, so its update wins. These
+# tests replay that exact composition.
+
+def _run_before_agents_in_registration_order(task: str, prior_state: dict | None = None) -> dict:
+    """Run PEV's then PlanReview's before_agent the way the framework does:
+    registration order, each update merged into state before the next hook."""
+    from deepagents.middleware.pev import PEVMiddleware
+    from langchain_core.messages import HumanMessage
+
+    state: dict = {"messages": [HumanMessage(content=task)], **(prior_state or {})}
+    for mw in (PEVMiddleware(), PlanReviewMiddleware()):
+        update = mw.before_agent(state, None)
+        if update:
+            state.update(update)
+    return state
+
+
+def test_before_agent_forces_plan_phase_for_simple_tasks():
+    """The regression that shipped: a task the classifier calls 'simple' got
+    phase 'fast', the boundary never existed, the toggle silently did nothing."""
+    from deepagents.middleware.pev import PEVMiddleware
+    from langchain_core.messages import HumanMessage
+
+    task = "add a comment to hello.py"
+    # Prove this test covers the bug: PEV alone routes this task to "fast".
+    pev_only = PEVMiddleware().before_agent(
+        {"messages": [HumanMessage(content=task)]}, None
+    )
+    assert pev_only["_pev_phase"] == "fast"
+
+    # With PlanReviewMiddleware registered after PEV, the merged phase is "plan".
+    state = _run_before_agents_in_registration_order(task)
+    assert state["_pev_phase"] == "plan"
+
+
+def test_before_agent_forces_plan_phase_for_trivial_tasks():
+    state = _run_before_agents_in_registration_order("show me the readme")
+    assert state["_pev_phase"] == "plan"
+
+
+def test_before_agent_rearms_review_for_second_task_on_thread(monkeypatch):
+    """_plan_reviewed persists in the thread's checkpointed state; task 2 must
+    reset it or the pause fires only once per session (the v1-audit bug)."""
+    # Task 2 starts with the flag still True from task 1's accept.
+    state = _run_before_agents_in_registration_order(
+        "add a second comment to hello.py", prior_state={"_plan_reviewed": True}
+    )
+    assert state["_plan_reviewed"] is False
+
+    # And the re-armed state actually interrupts again at the boundary.
+    called = []
+    monkeypatch.setattr(pr, "interrupt", lambda v: called.append(v) or {"accept": True})
+    out = PlanReviewMiddleware()._maybe_review(
+        {**state, "_pev_phase": "execute", "_pev_plan": "PLAN 2"}
+    )
+    assert out == {"_plan_reviewed": True}
+    assert called and called[0]["plan"] == "PLAN 2"
+
+
+# ── Factory: attached after PEV when on; absent when off (zero regression) ────
+#
+# Same kwargs-capture pattern as tests/test_factory_tool_routing.py: fake
+# create_deep_agent/_build_model so no graph or model is built, then inspect the
+# middleware list the factory actually passes.
+
+def _capture_factory_middleware(monkeypatch, tmp_path, **agent_kwargs) -> list:
+    from hcode_v2.agent import factory
+
+    captured: dict = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(factory, "create_deep_agent", fake_create_deep_agent)
+    monkeypatch.setattr(factory, "_build_model", lambda *a, **k: object())
+    monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    (tmp_path / "workflows").mkdir(exist_ok=True)
+
+    async def _build() -> None:
+        await factory.create_hcode_agent(
+            persist=False,
+            mcp_config=str(tmp_path / "no_such_mcp.json"),
+            skills_dir=str(tmp_path / "skills"),
+            workflows_dir=str(tmp_path / "workflows"),
+            work_dir=str(tmp_path),
+            **agent_kwargs,
+        )
+
+    asyncio.run(_build())
+    return captured["middleware"]
+
+
+def test_factory_registers_plan_review_after_pev(tmp_path, monkeypatch):
+    """Ordering is load-bearing: before_agent updates merge in registration
+    order, so the override only wins if PlanReview comes after PEV."""
+    from deepagents.middleware.pev import PEVMiddleware
+
+    middleware = _capture_factory_middleware(monkeypatch, tmp_path, plan_review=True)
+    types = [type(m) for m in middleware]
+    assert PlanReviewMiddleware in types
+    assert types.index(PEVMiddleware) < types.index(PlanReviewMiddleware)
+
+
+def test_factory_omits_plan_review_by_default(tmp_path, monkeypatch):
+    """plan_review absent → middleware absent → default runs byte-identical."""
+    middleware = _capture_factory_middleware(monkeypatch, tmp_path)
+    assert PlanReviewMiddleware not in [type(m) for m in middleware]
+
+
 # ── Daemon pause → emit → resume loop (fake agent) ─────────────────────────────
 
 class _FakeInterrupt:
