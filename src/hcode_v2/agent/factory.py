@@ -388,6 +388,20 @@ async def create_hcode_agent(
     # P1: one authoritative path/tool-naming correction, appended after every
     # vendored prompt segment above (ordering guaranteed — see harness_notes.py).
     middleware.append(HarnessNotesMiddleware(_HARNESS_CLARITY_NOTE))
+    # Post-edit LSP gate: after every successful write/edit, run the language
+    # server on JUST the edited file and — on real ERRORS only — append the
+    # diagnostics to the tool result so the model fixes them in its natural next
+    # turn. This is the phase-independent type-check safety net: fast-mode edits
+    # (most ordinary tasks) get checked without paying for plan+verify model
+    # round-trips. Clean edit → result untouched → zero added model calls.
+    # Structurally cannot double the Verify-lane provider (verify strips mutating
+    # tools; the gate also skips on _pev_phase=="verify" defensively). No server
+    # or non-code file → provider returns None → pass-through (zero regression).
+    # Kill-switch: HCODE_POST_EDIT_LSP=0/false/off omits the middleware entirely.
+    # HCode-side; deepagents untouched.
+    if os.getenv("HCODE_POST_EDIT_LSP", "1").strip().lower() not in ("0", "false", "off"):
+        from hcode_v2.agent.post_edit_lsp import PostEditLspMiddleware
+        middleware.append(PostEditLspMiddleware())
     # Containment at the EXECUTION seam: re-home the path arg of every file tool
     # (builtins AND hcode's) through _resolve_path before the tool runs, so a
     # bound-but-uncontained builtin the model calls from memory (e.g. write_file
