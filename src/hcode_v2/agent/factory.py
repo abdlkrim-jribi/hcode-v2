@@ -259,6 +259,7 @@ async def create_hcode_agent(
     fallback_models: list[str] | None = None,
     on_fallback: "Callable[[str, str], None] | None" = None,
     plan_review: bool = False,
+    force_plan: bool = False,
 ):
     """Assemble the full HCode v2 agent from environment config.
 
@@ -275,6 +276,12 @@ async def create_hcode_agent(
     ``plan_review`` (opt-in HITL) inserts ``PlanReviewMiddleware`` so the agent
     pauses at the plan→execute boundary for human accept/reject. ``False`` (the
     default) omits it entirely → unchanged run. Requires PEV (``enable_pev``).
+
+    ``force_plan`` (composer "Plan" mode) inserts ``ForcePlanMiddleware`` so the
+    task runs the full plan→execute→verify arc even when PEV's classifier would
+    have routed it to the single-pass ``fast`` phase. ``False`` (the default and
+    the "Fast"/absent case) omits it entirely → the classifier's verdict stands →
+    unchanged run. Requires PEV (``enable_pev``).
     """
     from deepagents.checkpointers.sqlite import HCodeSQLiteCheckpointer
     from langgraph.checkpoint.memory import MemorySaver
@@ -333,6 +340,15 @@ async def create_hcode_agent(
         if plan_review:
             from hcode_v2.agent.plan_review import PlanReviewMiddleware
             middleware.append(PlanReviewMiddleware())
+        # Force-plan (opt-in "Plan" mode): pin the initial phase to "plan" so the
+        # full arc runs for any task, overriding the classifier's fast routing.
+        # Added ONLY when force_plan=True AND PEV is on. Registered after PEV so
+        # its before_agent override merges over PEV's classification. Absent by
+        # default → the classifier's verdict stands → zero behaviour change.
+        # Composes with plan_review: both set _pev_phase="plan" (idempotent).
+        if force_plan:
+            from hcode_v2.agent.force_plan import ForcePlanMiddleware
+            middleware.append(ForcePlanMiddleware())
     if enable_safety:
         middleware.append(SafetyGuardMiddleware())
     # skills_dir=None → resolve the built-in skills install-relative (CWD-independent)

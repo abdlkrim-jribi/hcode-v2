@@ -48,7 +48,7 @@ def test_abort_cancels_running_task_and_emits_aborted(monkeypatch, restore_stdou
     started = asyncio.Event()
     released = asyncio.Event()
 
-    async def _slow_task(req_id, task, thread_id, work_dir=None, active_skills=None, model=None, plan_review=False):
+    async def _slow_task(req_id, task, thread_id, work_dir=None, active_skills=None, model=None, plan_review=False, force_plan=False):
         # Simulate a long-running task with multiple yield points.
         started.set()
         await released.wait()   # this await is where CancelledError lands

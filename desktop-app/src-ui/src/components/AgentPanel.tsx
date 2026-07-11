@@ -46,6 +46,9 @@ interface AgentPanelProps {
     /** Plan review (HITL): per-session toggle + accept/reject callback. */
     planReview: boolean;
     onTogglePlanReview: (on: boolean) => void;
+    /** Composer mode (Plan forces the full PEV arc; Fast = classifier default). */
+    mode: 'planning' | 'fast';
+    onModeChange: (mode: 'planning' | 'fast') => void;
     onPlanDecision: (turnId: string, accept: boolean) => void;
 }
 
@@ -75,6 +78,8 @@ export default function AgentPanel({
     onSelectModel,
     planReview,
     onTogglePlanReview,
+    mode,
+    onModeChange,
     onPlanDecision,
 }: AgentPanelProps) {
     return (
@@ -115,6 +120,8 @@ export default function AgentPanel({
                 onDismissSkill={onDismissSkill}
                 onSubmit={onSubmitTask}
                 onAbort={onAbort}
+                mode={mode}
+                onModeChange={onModeChange}
             />
         </div>
     );

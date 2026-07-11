@@ -16,11 +16,14 @@ interface Props {
     onDismissSkill?: () => void;
     onSubmit: (task: string, mode: 'planning' | 'fast') => void;
     onAbort?: () => void;
+    /** Controlled per-session mode: Plan forces the full plan→execute→verify arc;
+     *  Fast leaves PEV's classifier to decide (single-pass for ordinary tasks). */
+    mode: 'planning' | 'fast';
+    onModeChange: (mode: 'planning' | 'fast') => void;
 }
 
-export default function Composer({ disabled, activeSkill, onDismissSkill, onSubmit, onAbort }: Props) {
+export default function Composer({ disabled, activeSkill, onDismissSkill, onSubmit, onAbort, mode, onModeChange }: Props) {
     const [taskInput, setTaskInput] = useState('');
-    const [mode, setMode] = useState<'planning' | 'fast'>('planning');
 
     const submit = () => {
         const trimmed = taskInput.trim();
@@ -58,9 +61,25 @@ export default function Composer({ disabled, activeSkill, onDismissSkill, onSubm
             </div>
 
             <div className="hcode-composer-controls">
-                <div className="hcode-composer-mode">
-                    <button className={`hcode-mode-btn ${mode === 'planning' ? 'is-active' : ''}`} onClick={() => setMode('planning')}>Plan</button>
-                    <button className={`hcode-mode-btn ${mode === 'fast' ? 'is-active' : ''}`} onClick={() => setMode('fast')}>Fast</button>
+                <div className="hcode-composer-mode" role="radiogroup" aria-label="Run mode">
+                    <button
+                        className={`hcode-mode-btn ${mode === 'planning' ? 'is-active' : ''}`}
+                        role="radio"
+                        aria-checked={mode === 'planning'}
+                        title="Plan: run the full plan → execute → verify arc (with a language-server type check) for any task."
+                        onClick={() => onModeChange('planning')}
+                    >
+                        Plan
+                    </button>
+                    <button
+                        className={`hcode-mode-btn ${mode === 'fast' ? 'is-active' : ''}`}
+                        role="radio"
+                        aria-checked={mode === 'fast'}
+                        title="Fast: single-pass. PEV's classifier decides — ordinary tasks skip planning and verification."
+                        onClick={() => onModeChange('fast')}
+                    >
+                        Fast
+                    </button>
                 </div>
                 <div className="hcode-composer-send">
                     <span className="hcode-composer-hint">{disabled ? 'Agent is working…' : 'Ctrl+Enter to send'}</span>

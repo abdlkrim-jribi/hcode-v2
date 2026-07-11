@@ -197,6 +197,14 @@ export default function App() {
     try { const s = localStorage.getItem('hcode-session-plan-review'); return s ? JSON.parse(s) : {}; }
     catch { return {}; }
   });
+  // Per-session composer mode (Plan vs Fast), keyed by thread_id. "planning"
+  // forces the full plan→execute→verify arc; "fast" (absent default here matches
+  // the daemon's absent→classifier behaviour). Same localStorage convention so a
+  // session's mode survives reloads and session switches.
+  const [sessionMode, setSessionMode] = useState<Record<string, 'planning' | 'fast'>>(() => {
+    try { const s = localStorage.getItem('hcode-session-mode'); return s ? JSON.parse(s) : {}; }
+    catch { return {}; }
+  });
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
@@ -224,6 +232,7 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('hcode-session-names', JSON.stringify(sessionNames)); } catch { /* storage unavailable */ } }, [sessionNames]);
   useEffect(() => { try { localStorage.setItem('hcode-session-models', JSON.stringify(sessionModels)); } catch { /* storage unavailable */ } }, [sessionModels]);
   useEffect(() => { try { localStorage.setItem('hcode-session-plan-review', JSON.stringify(sessionPlanReview)); } catch { /* storage unavailable */ } }, [sessionPlanReview]);
+  useEffect(() => { try { localStorage.setItem('hcode-session-mode', JSON.stringify(sessionMode)); } catch { /* storage unavailable */ } }, [sessionMode]);
   // Fetch the live model catalog once on mount. listModels never throws an empty
   // result (the daemon falls back to the .env model), but guard anyway so a
   // transport failure just leaves the dropdown on "default".
@@ -264,6 +273,9 @@ export default function App() {
   const selectedModel = sessionModels[state.currentSessionId] ?? null;
   // Plan-review toggle for the active session (default off). Persisted per session.
   const planReviewEnabled = sessionPlanReview[state.currentSessionId] ?? false;
+  // Composer mode for the active session; default "planning" matches the prior
+  // composer default. Absence in the map means never toggled → "planning".
+  const sessionModeValue: 'planning' | 'fast' = sessionMode[state.currentSessionId] ?? 'planning';
   const reviewTurn = state.reviewTurnId ? state.turns.find(t => t.id === state.reviewTurnId) ?? null : null;
   const pendingPatchCount = useMemo(() => state.turns.reduce((n, t) => n + t.patches.length, 0), [state.turns]);
   // Sessions for the dropdown: active first, then any session we have in-run turns
@@ -438,6 +450,10 @@ export default function App() {
       else delete next[state.currentSessionId];
       return next;
     });
+  }, [state.currentSessionId]);
+
+  const handleSetMode = useCallback((mode: 'planning' | 'fast') => {
+    setSessionMode(prev => ({ ...prev, [state.currentSessionId]: mode }));
   }, [state.currentSessionId]);
 
   // Accept (continue to execute) / reject (stop) a paused plan. Optimistically
@@ -704,6 +720,8 @@ export default function App() {
                 onSelectModel={handleSelectModel}
                 planReview={planReviewEnabled}
                 onTogglePlanReview={handleTogglePlanReview}
+                mode={sessionModeValue}
+                onModeChange={handleSetMode}
                 onPlanDecision={handlePlanDecision}
               />
             )}
