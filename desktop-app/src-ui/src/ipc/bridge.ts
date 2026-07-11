@@ -13,7 +13,7 @@
  *   listSkills, listWorkflows, runWorkflow
  *   listMcpServers, connectMcpServer, disconnectMcpServer
  */
-import type { HcodeMessage, FileEntry, DaemonInfo } from '../types';
+import type { HcodeMessage, FileEntry, DaemonInfo, DaemonError } from '../types';
 
 // ── Transport selection ───────────────────────────────────────────────────────
 //
@@ -652,4 +652,12 @@ export async function onDaemonMessage(callback: (msg: HcodeMessage) => void): Pr
 export async function onDaemonStatus(callback: (info: DaemonInfo) => void): Promise<() => void> {
     const listen = await getListen();
     return listen('daemon-status', event => callback(event.payload as DaemonInfo));
+}
+// daemon-error is emitted ONLY by the native Tauri supervisor (daemon.rs) when a
+// spawn dies before ready / times out / can't be located. The WS proxy and mock
+// have no such failure path, so getListen returns their no-op listeners there and
+// this simply never fires — no behaviour change off the native path.
+export async function onDaemonError(callback: (err: DaemonError) => void): Promise<() => void> {
+    const listen = await getListen();
+    return listen('daemon-error', event => callback(event.payload as DaemonError));
 }

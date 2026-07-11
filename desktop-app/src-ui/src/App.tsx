@@ -208,6 +208,11 @@ export default function App() {
   // Filesystem/OS-action errors (folder/file). Kept OUT of the conversation —
   // they are app-level, not part of any agent turn.
   const [fsError, setFsError] = useState<string | null>(null);
+  // Daemon failed to come up (native only): why + the discovery tried-list + the
+  // process stderr tail. Surfaced as a dismissible banner so a dead daemon is
+  // never silent. Null = no error.
+  const [daemonError, setDaemonError] = useState<import('./types').DaemonError | null>(null);
+  const [daemonErrorExpanded, setDaemonErrorExpanded] = useState(false);
   // Non-destructive transient notice (e.g. single-flight "a task is already running").
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -302,7 +307,7 @@ export default function App() {
     };
 
     const handleMessage = (msg: HcodeMessage) => {
-      if (msg.type === 'ready') { dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' }); return; }
+      if (msg.type === 'ready') { setDaemonError(null); dispatch({ type: 'SET_DAEMON_STATUS', status: 'running' }); return; }
       dispatch({ type: 'AGENT_MSG', msg });
       if (msg.type === 'done') {
         // A completed task may have just persisted this session's .db — refresh the list.
@@ -322,6 +327,14 @@ export default function App() {
 
     track(ipc.onDaemonMessage(handleMessage));
     track(ipc.onDaemonStatus(info => dispatch({ type: 'SET_DAEMON_STATUS', status: info.status })));
+    // Native-only: a spawn that dies before ready / times out / can't be found
+    // arrives here. Show WHY (banner) and flip the pill to error. A later
+    // successful ready message clears it (see handleMessage).
+    track(ipc.onDaemonError(err => {
+      setDaemonError(err);
+      setDaemonErrorExpanded(false);
+      dispatch({ type: 'SET_DAEMON_STATUS', status: 'error' });
+    }));
     ipc.startDaemon()
       .then(info => dispatch({ type: 'SET_DAEMON_STATUS', status: info.status }))
       .catch(() => dispatch({ type: 'SET_DAEMON_STATUS', status: 'error' }));
@@ -584,6 +597,42 @@ export default function App() {
         }}>
           <span>⚠ {fsError}</span>
           <button onClick={() => setFsError(null)} title="Dismiss" style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}>✕</button>
+        </div>
+      )}
+
+      {daemonError && (
+        <div style={{
+          padding: 'var(--space-2) var(--space-3)', background: 'hsla(0, 65%, 52%, 0.10)',
+          borderBottom: '1px solid var(--semantic-error)', color: 'var(--semantic-error)', fontSize: 'var(--text-xs)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 'var(--space-2)' }}>
+            <span style={{ whiteSpace: 'pre-wrap', flex: 1 }}>⚠ Daemon failed to start. {daemonError.message}</span>
+            <button onClick={() => setDaemonError(null)} title="Dismiss" style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', flexShrink: 0 }}>✕</button>
+          </div>
+          {(daemonError.stderr_tail.length > 0 || daemonError.tried.length > 0) && (
+            <button
+              onClick={() => setDaemonErrorExpanded(v => !v)}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 'var(--text-2xs)', padding: '4px 0 0', textDecoration: 'underline' }}
+            >
+              {daemonErrorExpanded ? '▾ Hide details' : '▸ Show details'}
+            </button>
+          )}
+          {daemonErrorExpanded && (
+            <div style={{ marginTop: 'var(--space-1)', fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)', color: 'var(--fg-secondary)', maxHeight: '160px', overflowY: 'auto' }}>
+              {daemonError.tried.length > 0 && (
+                <div style={{ marginBottom: 'var(--space-1)' }}>
+                  <div style={{ color: 'var(--fg-tertiary)' }}>Tried (in order):</div>
+                  {daemonError.tried.map((t, i) => <div key={i}>  - {t}</div>)}
+                </div>
+              )}
+              {daemonError.stderr_tail.length > 0 && (
+                <div>
+                  <div style={{ color: 'var(--fg-tertiary)' }}>Daemon stderr (last {daemonError.stderr_tail.length} line{daemonError.stderr_tail.length > 1 ? 's' : ''}):</div>
+                  {daemonError.stderr_tail.map((t, i) => <div key={i} style={{ whiteSpace: 'pre-wrap' }}>{t}</div>)}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
