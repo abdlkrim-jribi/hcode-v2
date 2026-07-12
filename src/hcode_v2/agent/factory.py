@@ -384,6 +384,13 @@ async def create_hcode_agent(
     excluded_tools = set(_EXCLUDED_BUILTIN_TOOLS)
     if not _is_interactive_stdin():
         excluded_tools |= {"ask_user", "confirm"}
+    # Prompt slimming (HCODE_SLIM_PROMPT: 0=off, 1=default, max=free-tier lane):
+    # level>=1 drops the unused `task` subagent rider (1.7k schema + 0.5k prompt
+    # per call); level max also drops the notebook/web trios to fit per-request
+    # caps like Groq free's 8k. See prompt_slim.py for the measured rationale.
+    from hcode_v2.agent.prompt_slim import PromptSlimMiddleware, slim_excluded_tools, slim_level
+    _slim = slim_level()
+    excluded_tools |= slim_excluded_tools(_slim)
     middleware.append(_ToolExclusionMiddleware(excluded=frozenset(excluded_tools)))
     # P1: one authoritative path/tool-naming correction, appended after every
     # vendored prompt segment above (ordering guaranteed — see harness_notes.py).
@@ -410,6 +417,14 @@ async def create_hcode_agent(
     # hcode's own, or any excluded builtin still named from memory). HCode-side;
     # deepagents untouched.
     middleware.append(_PathContainmentMiddleware())
+    # Prompt slimming, LAST so it sees the fully-assembled system message (same
+    # ordering guarantee harness_notes.py documents): phase-scopes the skills
+    # section, excises vendored sections describing excluded tools, and (at
+    # level max) caps the per-phase completion budget for providers that count
+    # max_tokens toward a per-request limit. "0" → absent → byte-identical
+    # pre-slim behaviour. HCode-side; deepagents untouched.
+    if _slim != "0":
+        middleware.append(PromptSlimMiddleware(level=_slim))
 
     mcp_tools = []
     # _client_factory injects each server's env_required secrets from os.environ
