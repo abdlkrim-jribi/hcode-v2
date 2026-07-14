@@ -674,11 +674,15 @@ class JsonRpcDaemon:
                     # off → unchanged single-model agent). on_fallback surfaces a
                     # switch to the UI as a model_fallback event.
                     fallback_models = await self._resolve_fallbacks(model)
+                    # reason arrives from ResilientChatModel (3-arg form): e.g.
+                    # "timed out after 90s (no first token)" for a provider
+                    # STALL vs "rate-limited/exhausted" for 429s — so the UI can
+                    # say WHY the switch happened (cross-provider failover, M6).
                     on_fallback = (
-                        (lambda frm, to: self.emit_event(
+                        (lambda frm, to, reason=None: self.emit_event(
                             "model_fallback",
                             {"from": frm, "to": to,
-                             "message": f"{frm} rate-limited — switched to {to}"},
+                             "message": f"{frm} {reason or 'rate-limited'} — switched to {to}"},
                         ))
                         if fallback_models else None
                     )

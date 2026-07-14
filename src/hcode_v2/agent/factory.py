@@ -105,7 +105,9 @@ def _is_interactive_stdin() -> bool:
 
 
 def _build_one_model(model_name: str, config: Config, max_tokens: int,
-                     anthropic_key: str | None, inner_retries: int | None):
+                     anthropic_key: str | None, inner_retries: int | None,
+                     base_url_override: str | None = None,
+                     api_key_override: str | None = None):
     """Build a single chat model client for ``model_name``.
 
     ``inner_retries`` controls the provider SDK's own retry count: ``None`` leaves
@@ -113,7 +115,20 @@ def _build_one_model(model_name: str, config: Config, max_tokens: int,
     defaults to 2), and ``0`` disables SDK retries so the ResilientChatModel is the
     single source of retry/backoff truth on the fallback path. The model is then
     wrapped with ``JsonToolCallWrapper`` per ``HCODE_TOOLCALL_MODE``.
+
+    ``base_url_override``/``api_key_override`` (cross-provider fallback, M6) point
+    this ONE client at a different provider than the active Config — always via
+    the OpenAI-compatible branch. Absent (the default) → exact prior behaviour.
     """
+    if base_url_override or api_key_override:
+        from langchain_openai import ChatOpenAI
+        kw = {} if inner_retries is None else {"max_retries": inner_retries}
+        base_model = ChatOpenAI(
+            model=model_name, max_tokens=max_tokens,
+            api_key=api_key_override or config.api_key,
+            base_url=base_url_override or config.base_url, **kw,
+        )
+        return maybe_wrap(base_model, config.toolcall_mode)
     if anthropic_key and not config.api_key:
         from langchain_anthropic import ChatAnthropic
         kw = {} if inner_retries is None else {"max_retries": inner_retries}
@@ -128,6 +143,39 @@ def _build_one_model(model_name: str, config: Config, max_tokens: int,
             api_key=config.api_key, base_url=config.base_url, **kw,
         )
     return maybe_wrap(base_model, config.toolcall_mode)
+
+
+def _parse_fallback_entry(entry: str) -> tuple[str, str | None]:
+    """Split a fallback entry into ``(model, provider_alias | None)``.
+
+    ``"openai/gpt-oss-20b"``            → same-provider (today's #104 form).
+    ``"gpt-oss-120b@cerebras"``         → the model on the named provider, whose
+    endpoint/key come from ``HCODE_PROVIDER_<ALIAS>_BASE_URL/_API_KEY``. Split on
+    the LAST ``@`` (model slugs contain ``/`` but never ``@``).
+    """
+    if "@" not in entry:
+        return entry, None
+    model, _, provider = entry.rpartition("@")
+    model, provider = model.strip(), provider.strip()
+    if not model or not provider:
+        return entry, None  # malformed — treat as a plain same-provider slug
+    return model, provider
+
+
+def _provider_overrides(provider: str) -> tuple[str, str] | None:
+    """Resolve ``(base_url, api_key)`` for a provider alias from the environment.
+
+    Reads ``HCODE_PROVIDER_<ALIAS>_BASE_URL`` and ``..._API_KEY`` (alias upper-
+    cased, ``-``→``_``). Returns ``None`` when either is missing — the caller
+    SKIPS that entry with a warning rather than building a client that can only
+    fail (or, worse, silently reusing the wrong provider's key).
+    """
+    alias = provider.upper().replace("-", "_")
+    base_url = os.getenv(f"HCODE_PROVIDER_{alias}_BASE_URL", "").strip()
+    api_key = os.getenv(f"HCODE_PROVIDER_{alias}_API_KEY", "").strip()
+    if not base_url or not api_key:
+        return None
+    return base_url, api_key
 
 
 def _build_model(
@@ -185,16 +233,59 @@ def _build_model(
     # Resilience path: primary first, then the distinct fallbacks. Each inner
     # client's SDK retries are disabled (inner_retries=0) so ResilientChatModel
     # owns retry/backoff; it then handles fall-through to the next model.
-    from hcode_v2.provider.resilient import ResilientChatModel, default_retry_config
-    names = [primary] + [m for m in fallback_models if m and m != primary]
-    clients = [
-        _build_one_model(n, config, max_tokens, anthropic_key, inner_retries=0)
-        for n in names
-    ]
+    #
+    # Cross-provider entries (M6): a fallback entry "model@provider" builds its
+    # client against HCODE_PROVIDER_<PROVIDER>_BASE_URL/_API_KEY instead of the
+    # active Config — the M5 bake-off proved gpt-oss-120b runs on BOTH Groq and
+    # Cerebras, so the SAME model can dual-home across providers. An entry whose
+    # provider env is missing is SKIPPED with a warning (never silently built
+    # against the wrong provider's key). Plain entries keep #104's same-provider
+    # behaviour byte-for-byte.
+    from hcode_v2.provider.resilient import (
+        ResilientChatModel, default_call_timeout, default_retry_config,
+    )
+    clients, names = [], []
+    seen: set[str] = set()
+
+    clients.append(_build_one_model(primary, config, max_tokens, anthropic_key, inner_retries=0))
+    names.append(primary)
+    seen.add(primary)
+
+    for entry in fallback_models or []:
+        entry = (entry or "").strip()
+        if not entry or entry in seen:
+            continue
+        model_name, provider = _parse_fallback_entry(entry)
+        if provider is None:
+            if model_name == primary:
+                continue
+            clients.append(_build_one_model(model_name, config, max_tokens, anthropic_key, inner_retries=0))
+            names.append(model_name)
+        else:
+            overrides = _provider_overrides(provider)
+            if overrides is None:
+                logger.warning(
+                    "Fallback entry %r skipped: HCODE_PROVIDER_%s_BASE_URL/_API_KEY not set",
+                    entry, provider.upper().replace("-", "_"),
+                )
+                continue
+            base_url, api_key = overrides
+            clients.append(_build_one_model(
+                model_name, config, max_tokens, anthropic_key, inner_retries=0,
+                base_url_override=base_url, api_key_override=api_key,
+            ))
+            names.append(f"{model_name} @ {provider}")
+        seen.add(entry)
+
     mr, bb = default_retry_config(max_retries, backoff_base)
     return ResilientChatModel(
         clients=clients, model_names=names,
         max_retries=mr, backoff_base=bb, on_fallback=on_fallback,
+        # First-token stall budget (HCODE_FALLBACK_TIMEOUT, default 90s): the M5
+        # bake-off showed providers can fail by HANGING with zero bytes and no
+        # 429 — only a client-side timeout converts that into a failover. Only
+        # active on this opt-in path; the no-fallback client above has none.
+        call_timeout=default_call_timeout(),
     )
 
 
