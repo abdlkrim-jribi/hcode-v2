@@ -10,6 +10,15 @@ hiccup, not a hard failure:
    ordered list (the user's chosen model is always first) and continues there.
    It is *sticky* — once a fallback works it stays active, so a sustained rate
    limit does not re-hammer the dead primary on every step.
+3. **Stall timeout** (cross-provider, M6): when ``call_timeout`` is set, each
+   call must produce its first token within that budget or the candidate is
+   declared stalled and the chain ADVANCES IMMEDIATELY — no backoff retries on
+   a stalled provider (a 90s hang retried 3× would block the run for minutes).
+   This is the trigger a 429-only design misses: the M5 bake-off showed
+   Cerebras fails by hanging with zero bytes and NO error, so a client-side
+   timeout is the only signal that fires. Clients in the list may now point at
+   DIFFERENT providers (the factory builds per-entry endpoints), so the same
+   model can fail over Groq → Cerebras.
 
 Boundary discipline (why this is safe):
   - A 429 surfaces when a model call is made — before any tokens stream. The retry
@@ -57,6 +66,12 @@ _TRANSIENT_MARKERS = (
     "429", "rate limit", "rate-limit", "ratelimit", "too many requests",
     "temporarily rate-limited", "overloaded", "service unavailable",
     "503", "502", "504",
+    # Network-level failures are transient: the openai SDK retries these itself
+    # by default, but the fallback path builds clients with inner_retries=0 (the
+    # wrapper owns retry policy), so the wrapper must classify them too. Observed
+    # live in the M6 probe: an APIConnectionError("Connection error.") from a
+    # provider hard-failed the run instead of retrying/advancing the chain.
+    "connection error", "connect error", "connection refused", "connection reset",
 )
 
 
@@ -68,6 +83,12 @@ def is_transient_error(exc: BaseException) -> bool:
     toward retrying — a false positive costs one extra attempt, a false negative
     turns a recoverable 429 into a hard failure.
     """
+    # A stall/timeout is transient by definition (Python 3.11+: asyncio.TimeoutError
+    # IS builtins.TimeoutError). Its type name ("TimeoutError") and empty message
+    # match none of the string checks below, so test the type directly.
+    if isinstance(exc, TimeoutError):
+        return True
+
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -77,7 +98,7 @@ def is_transient_error(exc: BaseException) -> bool:
     name = type(exc).__name__.lower()
     if any(k in name for k in (
         "ratelimit", "internalservererror", "serviceunavailable",
-        "apitimeout", "overloaded",
+        "apitimeout", "overloaded", "apiconnection", "connecterror",
     )):
         return True
 
@@ -106,6 +127,23 @@ def default_retry_config(
     return max(0, max_retries), max(0.0, backoff_base)
 
 
+def default_call_timeout() -> float | None:
+    """Per-call first-token budget from ``HCODE_FALLBACK_TIMEOUT`` (seconds).
+
+    Default 90s — generous against free-tier reasoning latency (Groq first
+    token is ~1-40s) while still converting an indefinite provider stall (the
+    Cerebras failure mode) into a failover. ``0``/negative/invalid → ``None``
+    (timeout disabled). Only consulted when a fallback chain is configured, so
+    the no-fallback path carries no timeout and is byte-identical to before.
+    """
+    raw = os.getenv("HCODE_FALLBACK_TIMEOUT", "90").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        return 90.0
+    return val if val > 0 else None
+
+
 class ResilientChatModel(BaseChatModel):
     """Wrap an ordered list of chat models with retry-with-backoff + fallback.
 
@@ -121,7 +159,14 @@ class ResilientChatModel(BaseChatModel):
     max_retries: int = 2                     # retries PER model (attempts = max_retries + 1)
     backoff_base: float = 0.5                # seconds; exponential: base * 2**attempt
     backoff_max: float = 8.0                 # cap a single backoff sleep
-    on_fallback: Optional[Callable[[str, str], None]] = None  # (from_name, to_name)
+    # First-token budget per call (seconds); None = no timeout (pre-M6 behaviour).
+    # A timeout advances the chain IMMEDIATELY (no backoff retries on a stall).
+    # Async paths only — the daemon and CLI both drive the async API; the sync
+    # _generate has no non-blocking way to bound a call and keeps prior behaviour.
+    call_timeout: Optional[float] = None
+    # Preferred signature (from_name, to_name, reason); a legacy 2-arg callable
+    # still works (called without reason).
+    on_fallback: Optional[Callable[..., None]] = None
 
     # Sticky active index — persists across calls on the SAME instance so a run
     # that fell back stays on the fallback instead of re-probing the dead primary.
@@ -136,15 +181,38 @@ class ResilientChatModel(BaseChatModel):
     def _backoff_seconds(self, attempt: int) -> float:
         return min(self.backoff_base * (2 ** attempt), self.backoff_max)
 
-    def _announce_fallback(self, from_idx: int, to_idx: int) -> None:
+    def _announce_fallback(self, from_idx: int, to_idx: int, reason: str = "rate-limited/exhausted") -> None:
         frm = self.model_names[from_idx] if from_idx < len(self.model_names) else "?"
         to = self.model_names[to_idx] if to_idx < len(self.model_names) else "?"
-        logger.warning("Model %s rate-limited/exhausted — falling back to %s", frm, to)
+        logger.warning("Model %s %s — falling back to %s", frm, reason, to)
         if self.on_fallback is not None:
             try:
-                self.on_fallback(frm, to)
+                try:
+                    self.on_fallback(frm, to, reason)
+                except TypeError:
+                    self.on_fallback(frm, to)  # legacy 2-arg callback
             except Exception:  # pragma: no cover - never let an emit hook break a run
                 pass
+
+    def _timeout_reason(self) -> str:
+        return f"timed out after {self.call_timeout:.0f}s (no first token)"
+
+    def _exhausted(self, last_exc: BaseException | None) -> BaseException:
+        """The terminal error once every candidate failed. A bare TimeoutError
+        stringifies to "" — the daemon's error event would carry an EMPTY
+        message (observed live in the M6 probe), so wrap it with a message that
+        names the chain and the last failure."""
+        if last_exc is None:
+            return RuntimeError("no model candidates")
+        if isinstance(last_exc, TimeoutError) and not str(last_exc):
+            chain = " -> ".join(self.model_names)
+            err = TimeoutError(
+                f"all model candidates failed ({chain}); last: "
+                f"{self._timeout_reason() if self.call_timeout else 'timed out'}"
+            )
+            err.__cause__ = last_exc
+            return err
+        return last_exc
 
     # ── tool binding ──────────────────────────────────────────────────────────
 
@@ -181,15 +249,26 @@ class ResilientChatModel(BaseChatModel):
         last_exc: BaseException | None = None
 
         while idx < n:
+            reason = "rate-limited/exhausted"
             for attempt in range(self.max_retries + 1):
                 gen = candidates[idx].astream(messages, **kwargs)
                 try:
-                    first = await gen.__anext__()
+                    # First-token budget: a stalled provider (connection open,
+                    # zero bytes — the Cerebras failure mode) raises TimeoutError
+                    # here; wait_for cancels the pending __anext__. An OUTER
+                    # cancellation (Abort) raises CancelledError instead —
+                    # wait_for keeps the two distinct by construction.
+                    first = await asyncio.wait_for(gen.__anext__(), self.call_timeout)
                 except StopAsyncIteration:
                     self._active = idx
                     return
                 except asyncio.CancelledError:
                     raise  # Abort — never swallow
+                except TimeoutError as exc:
+                    last_exc = exc
+                    reason = self._timeout_reason()
+                    await _aclose_quietly(gen)
+                    break  # a stall is expensive — NO backoff retries; advance now
                 except BaseException as exc:  # noqa: BLE001
                     if not is_transient_error(exc):
                         raise
@@ -203,12 +282,12 @@ class ResilientChatModel(BaseChatModel):
                 async for chunk in gen:
                     yield _as_chunk(chunk)
                 return
-            # retries on this model exhausted → fall back to the next, if any
+            # retries on this model exhausted (or it stalled) → next candidate
             if idx + 1 < n:
-                self._announce_fallback(idx, idx + 1)
+                self._announce_fallback(idx, idx + 1, reason)
             idx += 1
 
-        raise last_exc if last_exc is not None else RuntimeError("no model candidates")
+        raise self._exhausted(last_exc)
 
     # ── async non-streaming ───────────────────────────────────────────────────
 
@@ -219,13 +298,20 @@ class ResilientChatModel(BaseChatModel):
         last_exc: BaseException | None = None
 
         while idx < n:
+            reason = "rate-limited/exhausted"
             for attempt in range(self.max_retries + 1):
                 try:
-                    msg = await candidates[idx].ainvoke(messages, **kwargs)
+                    msg = await asyncio.wait_for(
+                        candidates[idx].ainvoke(messages, **kwargs), self.call_timeout
+                    )
                     self._active = idx
                     return _as_result(msg)
                 except asyncio.CancelledError:
                     raise
+                except TimeoutError as exc:
+                    last_exc = exc
+                    reason = self._timeout_reason()
+                    break  # stall — advance immediately, no backoff retries
                 except BaseException as exc:  # noqa: BLE001
                     if not is_transient_error(exc):
                         raise
@@ -233,10 +319,10 @@ class ResilientChatModel(BaseChatModel):
                     if attempt < self.max_retries:
                         await asyncio.sleep(self._backoff_seconds(attempt))
             if idx + 1 < n:
-                self._announce_fallback(idx, idx + 1)
+                self._announce_fallback(idx, idx + 1, reason)
             idx += 1
 
-        raise last_exc if last_exc is not None else RuntimeError("no model candidates")
+        raise self._exhausted(last_exc)
 
     # ── sync non-streaming (CLI parity; uses time.sleep) ──────────────────────
 
@@ -262,7 +348,16 @@ class ResilientChatModel(BaseChatModel):
                 self._announce_fallback(idx, idx + 1)
             idx += 1
 
-        raise last_exc if last_exc is not None else RuntimeError("no model candidates")
+        raise self._exhausted(last_exc)
+
+
+async def _aclose_quietly(gen: Any) -> None:
+    """Close an abandoned inner stream generator without letting its teardown
+    (connection close on an already-dead socket) mask the failover."""
+    try:
+        await gen.aclose()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _as_chunk(message: Any) -> ChatGenerationChunk:
@@ -277,4 +372,9 @@ def _as_result(message: Any) -> ChatResult:
     return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-__all__ = ["ResilientChatModel", "is_transient_error", "default_retry_config"]
+__all__ = [
+    "ResilientChatModel",
+    "is_transient_error",
+    "default_retry_config",
+    "default_call_timeout",
+]
