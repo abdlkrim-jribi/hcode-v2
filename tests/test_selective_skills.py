@@ -153,13 +153,24 @@ class TestFactoryActiveSkills:
         assert [s["name"] for s in loaded] == ["clean-code"]
 
     def test_all_builtins_load_with_none(self, monkeypatch, tmp_path: Path) -> None:
-        """active_skills=None → all 8 built-in skills loaded (unchanged behavior)."""
+        """active_skills=None → every built-in skill directory loads (unchanged behavior).
+
+        Asserts against the ACTUAL directory listing, not a hardcoded count — a
+        hardcoded number here previously broke the moment a skill was added (or a
+        stray untracked directory appeared in a local checkout) without the two
+        ever being reconciled. Counting the real dirs makes this self-updating.
+        """
         from hcode_v2.skills_path import builtin_skills_dir
         skills_root = builtin_skills_dir()
         if not skills_root.is_dir():
             pytest.skip("built-in skills dir not present")
 
+        expected_names = {
+            d.name for d in skills_root.iterdir()
+            if d.is_dir() and (d / "SKILL.md").is_file()
+        }
+
         mw_list = _capture_middleware(monkeypatch, tmp_path, active_skills=None)
         plain = next(m for m in mw_list if type(m) is HCodeSkillsMiddleware)
         loaded = plain._load_skills_from_dir()
-        assert len(loaded) == 8
+        assert {s["name"] for s in loaded} == expected_names
