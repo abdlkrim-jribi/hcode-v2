@@ -3,6 +3,10 @@
 Manual native verification of the Tauri desktop app (`cargo tauri dev`), recorded
 per feature. Each entry is a real run against the real daemon, not the mock.
 
+> **Cross-reference:** for the *original* discovery writeup of the plan-review and
+> no-daemon bugs this fix addresses (from the first native rebuild pass, 2026-07-09),
+> see `docs/native-smoke-discovery-2026-07.md`.
+
 ---
 
 ## fix/daemon-failure-visibility (2026-07)
