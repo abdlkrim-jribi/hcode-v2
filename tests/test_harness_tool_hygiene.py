@@ -269,39 +269,17 @@ async def test_awrap_model_call_appends_note() -> None:
 # _ToolExclusionMiddleware, HarnessNotesMiddleware, _PathContainmentMiddleware),
 # and the compiled LangGraph all run for real.
 
-class _OneShotFakeModel:
-    """Minimal BaseChatModel: bind_tools -> self, always answers with no tool
-    calls (mirrors GenericFakeChatModel.bind_tools's well-established pattern).
-    A response with no tool_calls ends the turn cleanly — the simplest
-    possible full round-trip through every middleware in the real stack.
-    """
-
-    def __init__(self) -> None:
-        from langchain_core.language_models import BaseChatModel
-
-        class _Impl(BaseChatModel):
-            @property
-            def _llm_type(self) -> str:
-                return "one-shot-fake"
-
-            def bind_tools(self, tools, *, tool_choice=None, **kwargs):
-                return self
-
-            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                from langchain_core.outputs import ChatGeneration, ChatResult
-                return ChatResult(generations=[
-                    ChatGeneration(message=AIMessage(content="Hello! Task done."))
-                ])
-
-        self._impl = _Impl()
-
-    def __call__(self):
-        return self._impl
-
-
 def test_agent_builds_and_runs_trivial_task_end_to_end(monkeypatch, tmp_path: Path) -> None:
+    # A response with no tool_calls ends the turn cleanly — the simplest
+    # possible full round-trip through every middleware in the real stack.
+    # (Shared ScriptedChatModel — see tests/helpers/scripted_model.py.)
+    from helpers.scripted_model import fresh_scripted_model
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(factory, "_build_model", lambda *a, **k: _OneShotFakeModel()())
+    monkeypatch.setattr(
+        factory, "_build_model",
+        lambda *a, **k: fresh_scripted_model([{"content": "Hello! Task done."}]),
+    )
     monkeypatch.setenv("HCODE_ROOT_DIR", str(tmp_path))
     (tmp_path / "skills").mkdir(exist_ok=True)
     (tmp_path / "workflows").mkdir(exist_ok=True)
