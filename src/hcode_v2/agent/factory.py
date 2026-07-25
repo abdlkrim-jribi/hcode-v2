@@ -462,6 +462,22 @@ async def create_hcode_agent(
         if force_plan:
             from hcode_v2.agent.force_plan import ForcePlanMiddleware
             middleware.append(ForcePlanMiddleware())
+        # PEV robustness (default ON; HCODE_PEV_ROBUSTNESS=0/false/off omits it):
+        # keep the arc moving when an unknown model misbehaves — asks the user a
+        # question (stalls a daemon run), claims EXECUTION COMPLETE having edited
+        # nothing (vacuous verify), or finishes without the exact marker (spins to
+        # the iteration cap). Registered AFTER PEV so its after_model runs BEFORE
+        # PEV's (reverse-registration order — see plan_review's note) and can
+        # pre-empt PEV's transition via jump_to for exactly those cases; for a
+        # well-behaved model every check falls through to None and PEV runs
+        # byte-identically. non_interactive reuses the same stdin check the
+        # ask_user gate (T3) uses, so the anti-clarification nudge/prompt applies
+        # only to no-TTY (daemon) runs. HCode-side; vendored pev.py untouched.
+        if os.getenv("HCODE_PEV_ROBUSTNESS", "1").strip().lower() not in ("0", "false", "off"):
+            from hcode_v2.agent.pev_robustness import PEVRobustnessMiddleware
+            middleware.append(
+                PEVRobustnessMiddleware(non_interactive=not _is_interactive_stdin())
+            )
     if enable_safety:
         middleware.append(SafetyGuardMiddleware())
     # skills_dir=None → resolve the built-in skills install-relative (CWD-independent)
