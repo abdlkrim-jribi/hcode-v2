@@ -250,6 +250,11 @@ desktop-app/src-ui/node_modules/
 /temp*.py
 probe_verify_out*.txt
 /scripts/probe_*.py
+# probe_daemon.py is the OPPOSITE of scratch — it's the maintained,
+# permanent raw-JSON-RPC verification probe (see docs/verification.md),
+# consolidating what used to be one-off throwaway probes like the ones the
+# rule above excludes. Carve it out explicitly rather than relaxing the rule.
+!/scripts/probe_daemon.py
 .hcode/backups/
 
 # Tauri desktop app — Cargo.lock IS tracked (it's an application: reproducible

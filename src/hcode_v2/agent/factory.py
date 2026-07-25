@@ -219,7 +219,29 @@ def _build_model(
     wrapped with ``JsonToolCallWrapper`` so the agent degrades gracefully on
     endpoints that lack native function-calling support.  Run
     ``scripts/probe_model.py`` against the endpoint to determine the right mode.
+
+    ``HCODE_FAKE_MODEL`` (verification infra, C8): when set to a scripted-turn
+    JSON file path AND ``HCODE_ALLOW_FAKE=1`` is ALSO set, returns a
+    ``ScriptedChatModel`` loaded from that file instead of building any real
+    provider client — no key, no network, no quota. This is what lets
+    ``scripts/probe_daemon.py`` drive the REAL daemon subprocess (real JSON-RPC
+    transport, real event bridge, real PEV/plan-review/post-edit-gate
+    middleware) with zero API dependency, e.g. in CI. TWO env vars are
+    required specifically so this can never activate by accident — a stray
+    ``HCODE_FAKE_MODEL`` left in an environment does nothing without the
+    second, explicit opt-in. Checked FIRST, before any other config
+    resolution, so a fake-model run never even touches ``Config.from_env()``
+    (no key needs to exist at all). See ``tests/helpers/scripted_model.py``.
     """
+    fake_script = os.getenv("HCODE_FAKE_MODEL", "").strip()
+    if fake_script and os.getenv("HCODE_ALLOW_FAKE", "").strip().lower() in ("1", "true", "yes", "on"):
+        import sys as _sys
+        helpers_dir = Path(__file__).resolve().parents[3] / "tests" / "helpers"
+        if str(helpers_dir) not in _sys.path:
+            _sys.path.insert(0, str(helpers_dir))
+        from scripted_model import fresh_scripted_model, load_script
+        return fresh_scripted_model(load_script(fake_script))
+
     config = Config.from_env()
     primary = model_override or config.model
     max_tokens = int(os.getenv("HCODE_MAX_TOKENS", "8000"))
