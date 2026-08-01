@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Deep research agent example using deepagents package"
 requires-python = ">=3.11"
 dependencies = [
-    "langchain-openai>=1.3.3",
-    "langchain-anthropic>=1.4.8",
+    "langchain-openai>=1.4.1",
+    "langchain-anthropic>=1.5.3",
     "langchain_tavily>=0.2.18",
     "pydantic>=2.13.4",
     "rich>=15.0.0",
@@ -17,7 +17,7 @@ dependencies = [
     "deepagents>=0.6.12",
     "python-dotenv>=1.2.2",
     "langgraph-cli[inmem]>=0.1.55",
-    "langchain-google-genai>=3.1.0",
+    "langchain-google-genai>=4.3.2",
 ]
 
 [tool.uv]
@@ -28,8 +28,8 @@ override-dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=2.1.0",
-    "ruff>=0.15.20",
+    "mypy>=2.3.0",
+    "ruff>=0.16.0",
 ]
 
 [build-system]
