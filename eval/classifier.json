@@ -1,0 +1,170 @@
+[
+  {
+    "task": "T1",
+    "type": "trivial",
+    "classifier_phase": "fast",
+    "expected_phase": "trivial",
+    "agree": false
+  },
+  {
+    "task": "T2",
+    "type": "trivial",
+    "classifier_phase": "trivial",
+    "expected_phase": "trivial",
+    "agree": true
+  },
+  {
+    "task": "T3",
+    "type": "trivial",
+    "classifier_phase": "fast",
+    "expected_phase": "trivial",
+    "agree": false
+  },
+  {
+    "task": "T4",
+    "type": "trivial",
+    "classifier_phase": "fast",
+    "expected_phase": "trivial",
+    "agree": false
+  },
+  {
+    "task": "S1",
+    "type": "simple",
+    "classifier_phase": "fast",
+    "expected_phase": "fast",
+    "agree": true
+  },
+  {
+    "task": "S2",
+    "type": "simple",
+    "classifier_phase": "fast",
+    "expected_phase": "fast",
+    "agree": true
+  },
+  {
+    "task": "S3",
+    "type": "simple",
+    "classifier_phase": "fast",
+    "expected_phase": "fast",
+    "agree": true
+  },
+  {
+    "task": "S4",
+    "type": "simple",
+    "classifier_phase": "fast",
+    "expected_phase": "fast",
+    "agree": true
+  },
+  {
+    "task": "M1",
+    "type": "moderate",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "M2",
+    "type": "moderate",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "M3",
+    "type": "moderate",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "M4",
+    "type": "moderate",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "C1",
+    "type": "complex",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "C2",
+    "type": "complex",
+    "classifier_phase": "plan",
+    "expected_phase": "plan",
+    "agree": true
+  },
+  {
+    "task": "C3",
+    "type": "complex",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "C4",
+    "type": "complex",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "B1",
+    "type": "bug",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "B2",
+    "type": "bug",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "B3",
+    "type": "bug",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "B4",
+    "type": "bug",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "E1",
+    "type": "semantic",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "E2",
+    "type": "semantic",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "E3",
+    "type": "semantic",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  },
+  {
+    "task": "E4",
+    "type": "semantic",
+    "classifier_phase": "fast",
+    "expected_phase": "plan",
+    "agree": false
+  }
+]

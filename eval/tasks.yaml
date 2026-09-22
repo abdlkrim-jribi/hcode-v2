@@ -1,0 +1,343 @@
+# HCode experimental evaluation — task set
+#
+# 24 tasks, 6 types x 4, over the fixed sandbox project in eval/sandbox/.
+# Every task carries an AUTOMATIC, objective success_check — no human judgment.
+#
+# success_check is a LIST of conditions; ALL must pass for the task to count as
+# a success. Condition kinds:
+#   answer_contains  {any: [...]}        final answer text contains one of these (case-insensitive)
+#   pytest           {files: [...]}      hidden check files copied in at check time, then run
+#   pytest_baseline  {}                  the sandbox's own tests/ suite still passes
+#   pyright_clean    {}                  pyright reports 0 errors over the work dir
+#   file_contains    {file, any|all}     a file's text contains the given substrings
+#   glob_contains    {glob, any}         at least one file matching glob contains one of these
+#
+# setup applies BEFORE the run (bug / type-error injection):
+#   replace {file, find, replace}        exact substring replacement; fails loudly if `find` is absent
+#
+# Hidden check files live in eval/checks/ and are copied into the work dir only
+# AFTER the agent has finished, so the agent can never read or game them.
+
+tasks:
+
+  # ── Trivial — read / locate. Answer text is the artefact. ────────────────────
+  - id: T1
+    type: trivial
+    prompt: >-
+      Which file in this project defines the function that applies a percentage
+      discount to a price? Reply with just the file path.
+    setup: []
+    success_check:
+      - kind: answer_contains
+        any: ["pricing.py"]
+
+  - id: T2
+    type: trivial
+    prompt: >-
+      What is the name of the class that stores inventory items keyed by SKU?
+      Reply with just the class name.
+    setup: []
+    success_check:
+      - kind: answer_contains
+        any: ["InventoryStore"]
+
+  - id: T3
+    type: trivial
+    prompt: >-
+      Which file defines the Item dataclass? Reply with just the file path.
+    setup: []
+    success_check:
+      - kind: answer_contains
+        any: ["models.py"]
+
+  - id: T4
+    type: trivial
+    prompt: >-
+      In inventory/report.py, which function returns the one-line summary of the
+      store? Reply with just the function name.
+    setup: []
+    success_check:
+      - kind: answer_contains
+        any: ["summarize"]
+
+  # ── Simple — modify one existing function. ──────────────────────────────────
+  - id: S1
+    type: simple
+    prompt: >-
+      In inventory/pricing.py, make apply_discount clamp its percent argument to
+      the range 0 to 100 before applying it: a negative percent must leave the
+      price unchanged, and a percent above 100 must give a price of 0.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_S1.py"]
+      - kind: pytest_baseline
+
+  - id: S2
+    type: simple
+    prompt: >-
+      In inventory/pricing.py, make compute_total ignore negative prices: any
+      negative value in the list must be treated as 0 instead of subtracting.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_S2.py"]
+      - kind: pytest_baseline
+
+  - id: S3
+    type: simple
+    prompt: >-
+      In inventory/store.py, change get_item so that it returns None when the SKU
+      is not present, instead of raising KeyError. Update the type annotation and
+      the docstring to match.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_S3.py"]
+      - kind: pyright_clean
+
+  - id: S4
+    type: simple
+    prompt: >-
+      In inventory/report.py, make summarize use the correct singular form when
+      the store holds exactly one item, i.e. "1 item, total ..." rather than
+      "1 items, total ...". Leave the plural case as it is.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_S4.py"]
+      - kind: pytest_baseline
+
+  # ── Moderate — add a feature AND its tests. ─────────────────────────────────
+  - id: M1
+    type: moderate
+    prompt: >-
+      Add a low_stock method to InventoryStore in inventory/store.py. It takes a
+      threshold integer and returns the list of items whose quantity is strictly
+      below that threshold, preserving insertion order. Also add tests for it in
+      the tests/ directory.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_M1.py"]
+      - kind: glob_contains
+        glob: "tests/*.py"
+        any: ["low_stock"]
+      - kind: pytest_baseline
+
+  - id: M2
+    type: moderate
+    prompt: >-
+      Add an apply_bulk_discount function to inventory/pricing.py. It takes a list
+      of prices and a percent, and returns a new list with the discount applied to
+      every price, reusing the existing apply_discount function. Also add tests for
+      it in the tests/ directory.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_M2.py"]
+      - kind: glob_contains
+        glob: "tests/*.py"
+        any: ["apply_bulk_discount"]
+      - kind: pytest_baseline
+
+  - id: M3
+    type: moderate
+    prompt: >-
+      Add a restock method to InventoryStore in inventory/store.py. It takes a sku
+      and an integer amount and increases that item's quantity by the amount,
+      raising a KeyError if the sku is unknown. Also add tests for it in the tests/
+      directory.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_M3.py"]
+      - kind: glob_contains
+        glob: "tests/*.py"
+        any: ["restock"]
+      - kind: pytest_baseline
+
+  - id: M4
+    type: moderate
+    prompt: >-
+      Add a total method to the Order dataclass in inventory/models.py. It takes an
+      InventoryStore and returns the total value of the order, i.e. for each line
+      the unit price of that SKU multiplied by the ordered quantity. Also add tests
+      for it in the tests/ directory.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_M4.py"]
+      - kind: glob_contains
+        glob: "tests/*.py"
+        any: ["total"]
+      - kind: pytest_baseline
+
+  # ── Complex — a coherent change spanning several files. ─────────────────────
+  - id: C1
+    type: complex
+    prompt: >-
+      Add a product category concept across the project. Give Item a category
+      field in inventory/models.py defaulting to "general", add an
+      items_by_category method to InventoryStore in inventory/store.py returning a
+      dict mapping each category to its list of items, and add a
+      format_by_category function to inventory/report.py that renders one section
+      per category.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_C1.py"]
+      - kind: pytest_baseline
+
+  - id: C2
+    type: complex
+    prompt: >-
+      Introduce a dedicated error type. Create inventory/errors.py defining an
+      ItemNotFound exception that subclasses KeyError, make InventoryStore.get_item
+      in inventory/store.py raise ItemNotFound instead of a bare KeyError, and
+      export ItemNotFound from inventory/__init__.py.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_C2.py"]
+      - kind: pytest_baseline
+
+  - id: C3
+    type: complex
+    prompt: >-
+      Add tax-inclusive reporting. Add a total_with_tax method to InventoryStore in
+      inventory/store.py that applies the existing with_tax helper from
+      inventory/pricing.py to the store total, and make format_report in
+      inventory/report.py append a final line "TOTAL WITH TAX <value>" formatted to
+      two decimals.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_C3.py"]
+      - kind: pytest_baseline
+
+  - id: C4
+    type: complex
+    prompt: >-
+      Add per-item discounting. Add a discounted_price method to Item in
+      inventory/models.py that takes a percent and reuses apply_discount from
+      inventory/pricing.py, and add a format_discounted function to
+      inventory/report.py that renders each item's discounted unit price at a given
+      percent.
+    setup: []
+    success_check:
+      - kind: pytest
+        files: ["checks/test_C4.py"]
+      - kind: pytest_baseline
+
+  # ── Bug fixing — a deliberately injected defect breaks the existing suite. ──
+  - id: B1
+    type: bug
+    prompt: >-
+      The test suite is failing. Run the tests, find the cause and fix it. Do not
+      change the tests.
+    setup:
+      - kind: replace
+        file: inventory/models.py
+        find: "return self.unit_price * self.quantity"
+        replace: "return self.unit_price + self.quantity"
+    success_check:
+      - kind: pytest_baseline
+
+  - id: B2
+    type: bug
+    prompt: >-
+      The test suite is failing. Run the tests, find the cause and fix it. Do not
+      change the tests.
+    setup:
+      - kind: replace
+        file: inventory/pricing.py
+        find: "    total = 0.0"
+        replace: "    total = 1.0"
+    success_check:
+      - kind: pytest_baseline
+
+  - id: B3
+    type: bug
+    prompt: >-
+      The test suite is failing. Run the tests, find the cause and fix it. Do not
+      change the tests.
+    setup:
+      - kind: replace
+        file: inventory/pricing.py
+        find: "return price * (1.0 - percent / 100.0)"
+        replace: "return price * (1.0 + percent / 100.0)"
+    success_check:
+      - kind: pytest_baseline
+
+  - id: B4
+    type: bug
+    prompt: >-
+      The test suite is failing. Run the tests, find the cause and fix it. Do not
+      change the tests.
+    setup:
+      - kind: replace
+        file: inventory/store.py
+        find: "return list(self._items.values())"
+        replace: "return list(self._items.values())[1:]"
+    success_check:
+      - kind: pytest_baseline
+
+  # ── Semantic error — type error Pyright detects; runtime behaviour intact, so
+  #    pyright_clean is the discriminating check and pytest_baseline guards
+  #    against "fixing" the types by breaking the behaviour. ───────────────────
+  - id: E1
+    type: semantic
+    prompt: >-
+      Run the Pyright type checker on this project, then fix the type error it
+      reports. Keep the runtime behaviour unchanged.
+    setup:
+      - kind: replace
+        file: inventory/store.py
+        find: "        return self._items[sku]"
+        replace: "        return self._items.get(sku)"
+    success_check:
+      - kind: pyright_clean
+      - kind: pytest_baseline
+
+  - id: E2
+    type: semantic
+    prompt: >-
+      Run the Pyright type checker on this project, then fix the type error it
+      reports. Keep the runtime behaviour unchanged.
+    setup:
+      - kind: replace
+        file: inventory/report.py
+        find: "x{item.quantity} = {item.line_value():.2f}"
+        replace: "x{item.quantity} = {item.price:.2f}"
+    success_check:
+      - kind: pyright_clean
+      - kind: pytest_baseline
+
+  - id: E3
+    type: semantic
+    prompt: >-
+      Run the Pyright type checker on this project, then fix the type error it
+      reports. Keep the runtime behaviour unchanged.
+    setup:
+      - kind: replace
+        file: inventory/models.py
+        find: "    quantity: int = 0"
+        replace: "    quantity: int = \"0\""
+    success_check:
+      - kind: pyright_clean
+      - kind: pytest_baseline
+
+  - id: E4
+    type: semantic
+    prompt: >-
+      Run the Pyright type checker on this project, then fix the type error it
+      reports. Keep the runtime behaviour unchanged.
+    setup:
+      - kind: replace
+        file: inventory/store.py
+        find: "    def total_value(self) -> float:"
+        replace: "    def total_value(self) -> int:"
+    success_check:
+      - kind: pyright_clean
+      - kind: pytest_baseline

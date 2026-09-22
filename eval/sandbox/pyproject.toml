@@ -1,0 +1,13 @@
+[project]
+name = "inventory-sandbox"
+version = "0.1.0"
+description = "Fixed sandbox project for the HCode experimental evaluation."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["inventory"]
+typeCheckingMode = "basic"
