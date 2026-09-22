@@ -1,0 +1,19 @@
+\begin{table}[htbp]
+\centering
+\caption{Phase initiale choisie par le TaskClassifier (hors ligne, sans appel modèle) comparée à la phase attendue par type.}
+\label{tab:classifier}
+\begin{tabular}{llcc}
+\toprule
+Type & Phase attendue & Phase choisie & Accord \\
+\midrule
+Trivial & trivial & fast ($\times$3), trivial ($\times$1) & 1/4 \\
+Simple & fast & fast ($\times$4) & 4/4 \\
+Modéré & plan & fast ($\times$4) & 0/4 \\
+Complexe & plan & fast ($\times$3), plan ($\times$1) & 1/4 \\
+Correction de bug & plan & fast ($\times$4) & 0/4 \\
+Erreur sémantique & plan & fast ($\times$4) & 0/4 \\
+\midrule
+\textbf{Total} & -- & -- & \textbf{6/24 (25.0\%)} \\
+\bottomrule
+\end{tabular}
+\end{table}
