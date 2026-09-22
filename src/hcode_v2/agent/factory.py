@@ -554,6 +554,19 @@ async def create_hcode_agent(
     # pre-slim behaviour. HCode-side; deepagents untouched.
     if _slim != "0":
         middleware.append(PromptSlimMiddleware(level=_slim))
+    # Plan-phase tool shim, registered LAST so it observes the FINAL tool list
+    # (after exclusion and slimming) and nothing downstream can undo it. PEV's
+    # plan phase binds zero tools; LangChain then omits the `tools` field
+    # entirely, Groq infers tool_choice="none", and gpt-oss emits a tool call
+    # anyway — the provider rejects the request and EVERY planning run dies at
+    # the first model call ("Tool choice is none, but model called a tool";
+    # measured 4/4 in eval/results.jsonl). The shim binds one inert tool when
+    # the list would be empty, and strips that same tool in every other phase so
+    # the normal menu is unchanged. Kill-switch: HCODE_PLAN_TOOL_SHIM=0.
+    # HCode-side; vendored pev.py untouched.
+    if os.getenv("HCODE_PLAN_TOOL_SHIM", "1").strip().lower() not in ("0", "false", "off"):
+        from hcode_v2.agent.plan_tool_shim import PlanPhaseToolShimMiddleware
+        middleware.append(PlanPhaseToolShimMiddleware())
 
     mcp_tools = []
     # _client_factory injects each server's env_required secrets from os.environ

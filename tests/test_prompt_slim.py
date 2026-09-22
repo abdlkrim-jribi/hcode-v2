@@ -225,10 +225,34 @@ def _capture_factory(monkeypatch, tmp_path, env_level):
     return captured["middleware"]
 
 
-def test_factory_appends_slim_by_default_and_last(monkeypatch, tmp_path):
+def test_factory_appends_slim_after_all_prompt_contributors(monkeypatch, tmp_path):
+    """Prompt slimming must see the FULLY-assembled system message.
+
+    Previously asserted as "slim is the last middleware". That was a proxy for
+    the real invariant and became inaccurate when PlanPhaseToolShimMiddleware
+    was appended after it — the shim rewrites ``request.tools`` only and never
+    touches the system message, so slimming still sees the complete prompt.
+    The invariant is now stated directly: every prompt-CONTRIBUTING middleware
+    precedes slimming, and anything after it must be prompt-neutral.
+    """
     mws = _capture_factory(monkeypatch, tmp_path, None)
     names = [type(m).__name__ for m in mws]
-    assert names[-1] == "PromptSlimMiddleware"
+    assert "PromptSlimMiddleware" in names
+    slim = names.index("PromptSlimMiddleware")
+
+    for contributor in (
+        "PEVMiddleware", "HCodeSkillsMiddleware", "SelectiveSkillsMiddleware",
+        "WorkflowMiddleware", "HarnessNotesMiddleware",
+    ):
+        if contributor in names:
+            assert names.index(contributor) < slim, (
+                f"{contributor} contributes prompt text and must run before slimming"
+            )
+
+    prompt_neutral = {"PlanPhaseToolShimMiddleware"}
+    assert set(names[slim + 1:]) <= prompt_neutral, (
+        f"a prompt-contributing middleware runs after slimming: {names[slim + 1:]}"
+    )
 
 
 def test_factory_omits_slim_at_level_0(monkeypatch, tmp_path):
