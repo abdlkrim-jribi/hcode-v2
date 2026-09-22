@@ -441,6 +441,19 @@ async def create_hcode_agent(
     )
 
     middleware = []
+    # Tool-call schema repair, registered FIRST so it is the OUTERMOST
+    # wrap_model_call ("first handler wraps all others") and therefore sees
+    # exceptions raised by the real model call through every inner middleware.
+    # A provider that rejects a malformed tool call fails the WHOLE completion,
+    # so there is no AIMessage and no tool result to correct — the error escapes
+    # to server.py's catch-all and kills the task ("recoverable": false).
+    # Measured: one malformed `edit` call (missing old_string/new_string) ended
+    # otherwise-healthy runs outright. This retries such a call, once told what
+    # was wrong, and re-raises everything else untouched.
+    # Kill-switch: HCODE_TOOL_CALL_REPAIR=0. HCode-side; deepagents untouched.
+    if os.getenv("HCODE_TOOL_CALL_REPAIR", "1").strip().lower() not in ("0", "false", "off"):
+        from hcode_v2.agent.tool_call_repair import ToolCallRepairMiddleware
+        middleware.append(ToolCallRepairMiddleware())
     if enable_pev:
         # W3.3: give Verify an LSP diagnostics provider. It self-gates — with no
         # language server installed it returns None and Verify behaves as before.
