@@ -1,6 +1,6 @@
 # Évaluation expérimentale de HCode — rapport de résultats
 
-*Généré le 2026-09-22 17:04 UTC à partir de `results.jsonl` (9 exécutions enregistrées).*
+*Généré le 2026-09-22 17:33 UTC à partir de `results.jsonl` (9 exécutions enregistrées).*
 
 > **SMOKE TEST — échantillon partiel.** Ces chiffres proviennent d'un sous-ensemble de tâches destiné à valider le harnais, **pas** de la campagne complète 24×3. Ils ne doivent pas être cités comme résultats définitifs.
 
@@ -107,3 +107,20 @@ Un échec qui se répète à l'identique sur plusieurs tâches indique un **déf
 | S1 | Simple | A | ⚠️ infra | 303.0 | 5 | 5 | 0 | plan |
 | S1 | Simple | B | ❌ failure | 17.4 | 0 | 0 | 0 | plan |
 | S1 | Simple | C | ❌ failure | 12.0 | 0 | 0 | 0 | plan |
+
+## 9. Avant / après les correctifs
+
+Mêmes exécutions, rejouées après application des deux correctifs (#136 attache-outil de la phase plan, #137 réparation d'appel d'outil). Un défaut qui **change de classe** plutôt que de disparaître n'est pas corrigé : il est déplacé.
+
+| Exécution | Avant | Après | Appels LLM | Outils |
+|---|---|---|---|---|
+| B1×A | D3 — appel d'outil bloqué / délai dépassé | D3 — appel d'outil bloqué / délai dépassé | 2 → 1 | 2 → 1 |
+| B1×B | D1 — liste d'outils vide (`tool_choice=none`) | D1b — nom d'outil halluciné (absent de `request.tools`) | 0 → 0 | 0 → 0 |
+| B1×C | D1 — liste d'outils vide (`tool_choice=none`) | D1b — nom d'outil halluciné (absent de `request.tools`) | 0 → 0 | 0 → 0 |
+| E1×A | D3 — appel d'outil bloqué / délai dépassé | D3 — appel d'outil bloqué / délai dépassé | 1 → 7 | 1 → 7 |
+| E1×B | D4 — infrastructure (débit, connexion) | D1b — nom d'outil halluciné (absent de `request.tools`) | 0 → 0 | 0 → 0 |
+| E1×C | D4 — infrastructure (débit, connexion) | D4 — infrastructure (débit, connexion) | 0 → 2 | 0 → 1 |
+| S1×A | D2 — arguments d'outil manquants (schéma) | D3 — appel d'outil bloqué / délai dépassé | 3 → 5 | 3 → 5 |
+| S1×B | D1 — liste d'outils vide (`tool_choice=none`) | D1b — nom d'outil halluciné (absent de `request.tools`) | 0 → 0 | 0 → 0 |
+| S1×C | D1 — liste d'outils vide (`tool_choice=none`) | D1b — nom d'outil halluciné (absent de `request.tools`) | 0 → 0 | 0 → 0 |
+| **Total** | — | — | **6 → 15** | **6 → 14** |

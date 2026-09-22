@@ -36,6 +36,85 @@ TYPE_FR = {
 }
 
 
+PRE_FIX = EVAL_DIR / "results_pre_fix.jsonl"
+
+# Defect taxonomy used throughout the report. Each label maps a measured error
+# to the class it belongs to, so a before/after comparison shows whether a
+# failure was REMOVED or merely CHANGED SHAPE.
+DEFECT_FR = {
+    "D1": "D1 — liste d'outils vide (`tool_choice=none`)",
+    "D1b": "D1b — nom d'outil halluciné (absent de `request.tools`)",
+    "D2": "D2 — arguments d'outil manquants (schéma)",
+    "D3": "D3 — appel d'outil bloqué / délai dépassé",
+    "D4": "D4 — infrastructure (débit, connexion)",
+}
+
+
+def defect_of(row: dict) -> str | None:
+    """Classify a measured row into the defect taxonomy (None = success)."""
+    if row.get("outcome") == "success":
+        return None
+    text = row.get("error_text") or ""
+    try:
+        msg = json.loads(text).get("message", text)
+    except Exception:
+        msg = text
+    if "Tool choice is none" in msg:
+        return "D1"
+    if "not in request.tools" in msg:
+        return "D1b"
+    if "did not match schema" in msg or "missing properties" in msg:
+        return "D2"
+    et = row.get("error_type") or ""
+    if et == "infra:timeout":
+        return "D3"
+    if et.startswith("infra:"):
+        return "D4"
+    return None
+
+
+def build_comparison(pre: list[dict], post: list[dict]) -> tuple[str, str]:
+    """(markdown, latex) before/after table over matching (task, config) pairs."""
+    p = {(r["task"], r["config"]): r for r in pre}
+    q = {(r["task"], r["config"]): r for r in post}
+    keys = sorted(set(p) & set(q))
+
+    md = ["| Exécution | Avant | Après | Appels LLM | Outils |",
+          "|---|---|---|---|---|"]
+    tex_rows = []
+    for k in keys:
+        a, b = p[k], q[k]
+        da = DEFECT_FR.get(defect_of(a) or "", "réussite")
+        db = DEFECT_FR.get(defect_of(b) or "", "réussite")
+        calls = f"{a.get('n_llm_calls', 0)} → {b.get('n_llm_calls', 0)}"
+        tools = f"{a.get('n_tool_calls', 0)} → {b.get('n_tool_calls', 0)}"
+        md.append(f"| {k[0]}×{k[1]} | {da} | {db} | {calls} | {tools} |")
+        tex_rows.append(
+            f"{k[0]}$\\times${k[1]} & {(defect_of(a) or 'OK')} & {(defect_of(b) or 'OK')} "
+            f"& {a.get('n_llm_calls', 0)} $\\to$ {b.get('n_llm_calls', 0)} "
+            f"& {a.get('n_tool_calls', 0)} $\\to$ {b.get('n_tool_calls', 0)} \\\\"
+        )
+
+    sa = sum(r.get("n_llm_calls") or 0 for r in p.values())
+    sb = sum(r.get("n_llm_calls") or 0 for r in q.values())
+    ta = sum(r.get("n_tool_calls") or 0 for r in p.values())
+    tb = sum(r.get("n_tool_calls") or 0 for r in q.values())
+    md.append(f"| **Total** | — | — | **{sa} → {sb}** | **{ta} → {tb}** |")
+
+    tex = (
+        "\\begin{table}[htbp]\n\\centering\n"
+        "\\caption{Effet des deux correctifs : classe de défaut et travail réellement "
+        "effectué, avant et après.}\n\\label{tab:avantapres}\n"
+        "\\begin{tabular}{lllcc}\n\\toprule\n"
+        "Exécution & Avant & Après & Appels LLM & Outils \\\\\n\\midrule\n"
+        + "\n".join(tex_rows) + "\n\\midrule\n"
+        + f"\\textbf{{Total}} & -- & -- & \\textbf{{{sa} $\\to$ {sb}}} "
+          f"& \\textbf{{{ta} $\\to$ {tb}}} \\\\\n"
+        + "\\bottomrule\n\\end{tabular}\n\\end{table}\n"
+    )
+    return "\n".join(md), tex
+
+
 def load(path: Path = RESULTS) -> list[dict]:
     if not path.exists():
         return []
@@ -338,6 +417,21 @@ def main() -> int:
     (TABLES / "by_type.tex").write_text(tex_by_type(grid), encoding="utf-8")
     if cl:
         (TABLES / "classifier.tex").write_text(tex_classifier(cl), encoding="utf-8")
+
+    # Before/after, when a pre-fix measurement set is present.
+    if PRE_FIX.exists():
+        pre = dedup(load(PRE_FIX))
+        md, tex = build_comparison(pre, rows)
+        (TABLES / "comparison.tex").write_text(tex, encoding="utf-8")
+        with (EVAL_DIR / "REPORT.md").open("a", encoding="utf-8") as fh:
+            fh.write("\n## 9. Avant / après les correctifs\n\n")
+            fh.write(
+                "Mêmes exécutions, rejouées après application des deux correctifs "
+                "(#136 attache-outil de la phase plan, #137 réparation d'appel "
+                "d'outil). Un défaut qui **change de classe** plutôt que de "
+                "disparaître n'est pas corrigé : il est déplacé.\n\n"
+            )
+            fh.write(md + "\n")
 
     print(f"wrote {EVAL_DIR / 'REPORT.md'}")
     print(f"wrote {TABLES}/*.tex  ({len(list(TABLES.glob('*.tex')))} tables)")

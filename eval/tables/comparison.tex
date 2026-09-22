@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering
+\caption{Effet des deux correctifs : classe de défaut et travail réellement effectué, avant et après.}
+\label{tab:avantapres}
+\begin{tabular}{lllcc}
+\toprule
+Exécution & Avant & Après & Appels LLM & Outils \\
+\midrule
+B1$\times$A & D3 & D3 & 2 $\to$ 1 & 2 $\to$ 1 \\
+B1$\times$B & D1 & D1b & 0 $\to$ 0 & 0 $\to$ 0 \\
+B1$\times$C & D1 & D1b & 0 $\to$ 0 & 0 $\to$ 0 \\
+E1$\times$A & D3 & D3 & 1 $\to$ 7 & 1 $\to$ 7 \\
+E1$\times$B & D4 & D1b & 0 $\to$ 0 & 0 $\to$ 0 \\
+E1$\times$C & D4 & D4 & 0 $\to$ 2 & 0 $\to$ 1 \\
+S1$\times$A & D2 & D3 & 3 $\to$ 5 & 3 $\to$ 5 \\
+S1$\times$B & D1 & D1b & 0 $\to$ 0 & 0 $\to$ 0 \\
+S1$\times$C & D1 & D1b & 0 $\to$ 0 & 0 $\to$ 0 \\
+\midrule
+\textbf{Total} & -- & -- & \textbf{6 $\to$ 15} & \textbf{6 $\to$ 14} \\
+\bottomrule
+\end{tabular}
+\end{table}
