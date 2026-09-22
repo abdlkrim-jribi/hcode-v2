@@ -1,6 +1,6 @@
 # Évaluation expérimentale de HCode — rapport de résultats
 
-*Généré le 2026-09-22 15:52 UTC à partir de `results.jsonl` (9 exécutions enregistrées).*
+*Généré le 2026-09-22 17:04 UTC à partir de `results.jsonl` (9 exécutions enregistrées).*
 
 > **SMOKE TEST — échantillon partiel.** Ces chiffres proviennent d'un sous-ensemble de tâches destiné à valider le harnais, **pas** de la campagne complète 24×3. Ils ne doivent pas être cités comme résultats définitifs.
 
@@ -20,25 +20,25 @@
 
 | Configuration | Réussite | Durée moy. (s) | Appels LLM | Outils | Corrections | Infra |
 |---|---|---|---|---|---|---|
-| A — Agent sans Verify | 0/1 (0.0 %) | 115.5 | 3.0 | 3.0 | 0.00 | 2 |
-| B — PEV sans la porte LSP post-édition (LSP de la phase Verify conservé) | 0/2 (0.0 %) | 5.5 | 0.0 | 0.0 | 0.00 | 1 |
-| C — PEV + LSP (système complet) | 0/2 (0.0 %) | 5.8 | 0.0 | 0.0 | 0.00 | 1 |
+| A — Agent sans Verify | -- | -- | -- | -- | -- | 3 |
+| B — PEV sans la porte LSP post-édition (LSP de la phase Verify conservé) | 0/3 (0.0 %) | 17.1 | 0.0 | 0.0 | 0.00 | 0 |
+| C — PEV + LSP (système complet) | 0/2 (0.0 %) | 14.7 | 0.0 | 0.0 | 0.00 | 1 |
 
 ## 4. Surcoût temporel de PEV
 
-- **B (PEV)** vs A : 5.5 s vs 115.5 s → **×0.05** (-95 %)
-- **C (PEV+LSP)** vs A : 5.8 s vs 115.5 s → **×0.05** (-95 %)
+- **B (PEV)** vs A : -- (données insuffisantes)
+- **C (PEV+LSP)** vs A : -- (données insuffisantes)
 
 ## 5. Réussite par type de tâche
 
 | Type | A (Fast) | B (PEV) | C (PEV+LSP) |
 |---|---|---|---|
 | Trivial | -- | -- | -- |
-| Simple | 0/1 | 0/1 | 0/1 |
+| Simple | -- | 0/1 | 0/1 |
 | Modéré | -- | -- | -- |
 | Complexe | -- | -- | -- |
 | Correction de bug | -- | 0/1 | 0/1 |
-| Erreur sémantique | -- | -- | -- |
+| Erreur sémantique | -- | 0/1 | -- |
 
 ## 6. Précision du classificateur (hors ligne, sans appel modèle)
 
@@ -79,8 +79,8 @@ Distribution des phases choisies : `fast` ×22, `plan` ×1, `trivial` ×1
 
 Total : **4** exécution(s).
 
-- `infra:provider` : 2
-- `infra:timeout` : 2
+- `infra:rate_limit` : 1
+- `infra:timeout` : 3
 
 ## 7bis. Signatures d'erreur systématiques
 
@@ -88,21 +88,22 @@ Un échec qui se répète à l'identique sur plusieurs tâches indique un **déf
 
 | Occurrences | Exécutions | Message |
 |---|---|---|
-| 4 | S1×B, S1×C, B1×B, B1×C | `Tool choice is none, but model called a tool` |
-| 2 | B1×A, E1×A | `harness timeout after 240.0s` |
-| 2 | E1×B, E1×C | `Connection error.` |
-| 1 | S1×A | `Tool call validation failed: tool call validation failed: parameters for tool edit did not match schema: errors: [missing properties: 'old_string', 'new_string'` |
+| 3 | S1×A, B1×A, E1×A | `harness timeout after 300.0s` |
+| 3 | B1×B, B1×C, E1×B | `Tool call validation failed: tool call validation failed: attempted to call tool 'bash' which was not in request.tools` |
+| 1 | S1×B | `Tool call validation failed: tool call validation failed: attempted to call tool 'repo_browser.print_tree' which was not in request.tools` |
+| 1 | S1×C | `Tool call validation failed: tool call validation failed: attempted to call tool 'repo_browser.read_file' which was not in request.tools` |
+| 1 | E1×C | `Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kbpc785zen988b6wr9m9aejy` service tier `on_de` |
 
 ## 8. Journal des exécutions
 
 | Tâche | Type | Conf. | Issue | Durée (s) | LLM | Outils | Corr. | Phases |
 |---|---|---|---|---|---|---|---|---|
-| B1 | Correction de bug | A | ⚠️ infra | 242.6 | 2 | 2 | 0 | plan |
-| B1 | Correction de bug | B | ❌ failure | 5.7 | 0 | 0 | 0 | plan |
-| B1 | Correction de bug | C | ❌ failure | 6.7 | 0 | 0 | 0 | plan |
-| E1 | Erreur sémantique | A | ⚠️ infra | 241.0 | 1 | 1 | 0 | plan |
-| E1 | Erreur sémantique | B | ⚠️ infra | 16.9 | 0 | 0 | 0 | plan |
-| E1 | Erreur sémantique | C | ⚠️ infra | 5.8 | 0 | 0 | 0 | plan |
-| S1 | Simple | A | ❌ failure | 115.5 | 3 | 3 | 0 | plan |
-| S1 | Simple | B | ❌ failure | 5.3 | 0 | 0 | 0 | plan |
-| S1 | Simple | C | ❌ failure | 5.0 | 0 | 0 | 0 | plan |
+| B1 | Correction de bug | A | ⚠️ infra | 302.9 | 1 | 1 | 0 | plan |
+| B1 | Correction de bug | B | ❌ failure | 12.9 | 0 | 0 | 0 | plan |
+| B1 | Correction de bug | C | ❌ failure | 17.4 | 0 | 0 | 0 | plan |
+| E1 | Erreur sémantique | A | ⚠️ infra | 301.5 | 7 | 7 | 0 | plan |
+| E1 | Erreur sémantique | B | ❌ failure | 21.0 | 0 | 0 | 0 | plan |
+| E1 | Erreur sémantique | C | ⚠️ infra | 60.5 | 2 | 1 | 0 | plan,execute |
+| S1 | Simple | A | ⚠️ infra | 303.0 | 5 | 5 | 0 | plan |
+| S1 | Simple | B | ❌ failure | 17.4 | 0 | 0 | 0 | plan |
+| S1 | Simple | C | ❌ failure | 12.0 | 0 | 0 | 0 | plan |
